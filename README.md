@@ -1,6 +1,33 @@
 # Codex Caps Lock Indicator
 
+[![CI](https://github.com/qqhgdkktu/codexcapslock/actions/workflows/ci.yml/badge.svg)](https://github.com/qqhgdkktu/codexcapslock/actions/workflows/ci.yml)
+
 Нативный индикатор активности Codex для MacBook. Он использует зелёный LED в клавише Caps Lock, но отправляет напрямую только HID output-report светодиода — настоящий режим Caps Lock и регистр набора не переключаются.
+
+## Быстрый старт
+
+Понадобятся:
+
+- MacBook со встроенной клавиатурой и физическим LED Caps Lock;
+- macOS 14 или новее;
+- установленный Codex, команда `codex` в `PATH`;
+- Swift toolchain из Xcode или Xcode Command Line Tools.
+
+```bash
+git clone https://github.com/qqhgdkktu/codexcapslock.git
+cd codexcapslock
+python3 scripts/install.py
+```
+
+После установки просто запустите задачу в Codex. Дополнительное приложение открывать не нужно: первый lifecycle hook запустит индикатор автоматически, в том числе после перезагрузки Mac.
+
+Проверить установку:
+
+```bash
+~/.local/bin/codex-capslock-indicator status
+```
+
+Полное руководство со сценариями, обновлением и диагностикой: [docs/USAGE.md](docs/USAGE.md). Инструкции для Codex и других AI-агентов: [AGENTS.md](AGENTS.md).
 
 ## Поведение
 
@@ -26,9 +53,10 @@
 
 Индикатор не устанавливает перехватчик клавиатуры, не читает набранный текст и не требует Accessibility или Input Monitoring. Он сверяет только системный флаг Caps Lock, когда горит завершение.
 
-## Установка
+## Повторная установка или обновление
 
 ```bash
+git pull --ff-only
 python3 scripts/install.py
 ```
 
