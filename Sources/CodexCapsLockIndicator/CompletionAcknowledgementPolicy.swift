@@ -7,6 +7,7 @@ enum CompletionAcknowledgementReason: Equatable, Sendable {
 
 struct CompletionAcknowledgementPolicy: Sendable {
     private var observedMode: IndicatorMode = .off
+    private var observedCompletionID: String?
     private var doneSince: Date?
     private var codexFrontmostSince: Date?
     private var lastCapsLockState: Bool
@@ -17,6 +18,7 @@ struct CompletionAcknowledgementPolicy: Sendable {
 
     mutating func observe(
         mode: IndicatorMode,
+        completionID: String? = nil,
         codexFrontmost: Bool,
         actualCapsLockState: Bool,
         capsLockAcknowledgementEnabled: Bool = true,
@@ -24,8 +26,9 @@ struct CompletionAcknowledgementPolicy: Sendable {
     ) -> CompletionAcknowledgementReason? {
         defer { lastCapsLockState = actualCapsLockState }
 
-        if mode != observedMode {
+        if mode != observedMode || completionID != observedCompletionID {
             observedMode = mode
+            observedCompletionID = completionID
             doneSince = mode == .done ? date : nil
             codexFrontmostSince = mode == .done && codexFrontmost ? date : nil
         }

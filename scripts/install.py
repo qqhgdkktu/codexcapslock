@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and install the Codex Caps Lock indicator for the current macOS user."""
+"""Build and install the Codex and Claude Code hardware indicator on macOS."""
 
 from __future__ import annotations
 
@@ -27,6 +27,8 @@ HOME = Path.home()
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", HOME / ".codex")).expanduser().resolve()
 HOOKS_FILE = CODEX_HOME / "hooks.json"
 CONFIG_FILE = CODEX_HOME / "config.toml"
+CLAUDE_HOME = Path(os.environ.get("CLAUDE_CONFIG_DIR", HOME / ".claude")).expanduser().resolve()
+CLAUDE_SETTINGS_FILE = CLAUDE_HOME / "settings.json"
 INSTALL_BIN = HOME / ".local" / "bin" / "codex-capslock-indicator"
 LAUNCH_AGENT = HOME / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 MAGSAFE_HELPER = Path("/Library/PrivilegedHelperTools") / MAGSAFE_LABEL
@@ -35,13 +37,23 @@ MAGSAFE_SOCKET = Path("/var/run") / f"{MAGSAFE_LABEL}.sock"
 STATE_DIR = HOME / "Library" / "Application Support" / "CodexCapsLockIndicator"
 HOOK_MARKER = "codex-capslock-indicator hook "
 
-HOOK_STATES = {
-    "UserPromptSubmit": "working",
-    "PreToolUse": "working",
-    "PermissionRequest": "waiting",
-    "PostToolUse": "working",
-    "Stop": "done",
-}
+CODEX_HOOKS = (
+    ("UserPromptSubmit", "working", None),
+    ("PreToolUse", "working", None),
+    ("PermissionRequest", "waiting", None),
+    ("PostToolUse", "working", None),
+    ("Stop", "done", None),
+)
+
+CLAUDE_HOOKS = (
+    ("UserPromptSubmit", "working", None),
+    ("PreToolUse", "working", None),
+    ("PermissionRequest", "waiting", None),
+    ("Notification", "waiting", "permission_prompt"),
+    ("PostToolUse", "working", None),
+    ("Stop", "done", None),
+    ("StopFailure", "done", None),
+)
 
 
 class InstallError(RuntimeError):
@@ -87,6 +99,8 @@ def backup_user_files() -> Path:
     for source in (HOOKS_FILE, CONFIG_FILE, LAUNCH_AGENT, MAGSAFE_LAUNCH_DAEMON):
         if source.exists():
             shutil.copy2(source, backup_dir / source.name)
+    if CLAUDE_SETTINGS_FILE.exists():
+        shutil.copy2(CLAUDE_SETTINGS_FILE, backup_dir / "claude-settings.json")
     return backup_dir
 
 
@@ -106,31 +120,37 @@ def atomic_json_write(path: Path, value: dict[str, Any], mode: int = 0o600) -> N
         temporary.unlink(missing_ok=True)
 
 
-def install_hooks() -> None:
-    if HOOKS_FILE.exists():
+def install_lifecycle_hooks(
+    settings_file: Path,
+    hook_specs: tuple[tuple[str, str, str | None], ...],
+    source: str,
+    *,
+    description: str | None = None,
+) -> int:
+    if settings_file.exists():
         try:
-            document = json.loads(HOOKS_FILE.read_text(encoding="utf-8"))
+            document = json.loads(settings_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
-            raise InstallError(f"Не удалось безопасно прочитать {HOOKS_FILE}: {error}") from error
+            raise InstallError(f"Не удалось безопасно прочитать {settings_file}: {error}") from error
     else:
         document = {}
 
     if not isinstance(document, dict):
-        raise InstallError(f"{HOOKS_FILE} должен содержать JSON-объект")
+        raise InstallError(f"{settings_file} должен содержать JSON-объект")
     hooks = document.setdefault("hooks", {})
     if not isinstance(hooks, dict):
-        raise InstallError(f"Поле hooks в {HOOKS_FILE} должно быть JSON-объектом")
+        raise InstallError(f"Поле hooks в {settings_file} должно быть JSON-объектом")
 
     # Remove older copies of this indicator from every supported or obsolete event.
     for event_name, existing_groups in list(hooks.items()):
         if not isinstance(existing_groups, list):
-            raise InstallError(f"Секция {event_name} в {HOOKS_FILE} должна быть массивом")
+            raise InstallError(f"Секция {event_name} в {settings_file} должна быть массивом")
         cleaned_groups: list[dict[str, Any]] = []
         for group in existing_groups:
             if not isinstance(group, dict):
                 cleaned_groups.append(group)
                 continue
-            handlers = group.get("hooks", [])
+            handlers = group.get("hooks")
             if not isinstance(handlers, list):
                 cleaned_groups.append(group)
                 continue
@@ -153,16 +173,36 @@ def install_hooks() -> None:
         else:
             hooks.pop(event_name, None)
 
-    for event_name, state in HOOK_STATES.items():
+    for event_name, state, matcher in hook_specs:
         existing_groups = hooks.get(event_name, [])
         if not isinstance(existing_groups, list):
-            raise InstallError(f"Секция {event_name} в {HOOKS_FILE} должна быть массивом")
-        command = f"{INSTALL_BIN} hook {state}"
-        existing_groups.append({"hooks": [{"type": "command", "command": command, "timeout": 5}]})
+            raise InstallError(f"Секция {event_name} в {settings_file} должна быть массивом")
+        command = f"{shlex.quote(str(INSTALL_BIN))} hook {state} {source}"
+        group: dict[str, Any] = {
+            "hooks": [{"type": "command", "command": command, "timeout": 5}]
+        }
+        if matcher is not None:
+            group["matcher"] = matcher
+        existing_groups.append(group)
         hooks[event_name] = existing_groups
 
-    document.setdefault("description", "User hooks, including the local Codex Caps Lock activity indicator.")
-    atomic_json_write(HOOKS_FILE, document)
+    if description is not None:
+        document.setdefault("description", description)
+    atomic_json_write(settings_file, document)
+    return len(hook_specs)
+
+
+def install_codex_hooks() -> int:
+    return install_lifecycle_hooks(
+        HOOKS_FILE,
+        CODEX_HOOKS,
+        "codex",
+        description="User hooks, including the local Codex Caps Lock activity indicator.",
+    )
+
+
+def install_claude_hooks() -> int:
+    return install_lifecycle_hooks(CLAUDE_SETTINGS_FILE, CLAUDE_HOOKS, "claude")
 
 
 class AppServerClient:
@@ -189,7 +229,7 @@ class AppServerClient:
                 "clientInfo": {
                     "name": "codex_capslock_indicator_installer",
                     "title": "Codex Caps Lock Indicator Installer",
-                    "version": "1.2.0",
+                    "version": "1.3.0",
                 }
             },
         )
@@ -249,12 +289,12 @@ def trust_indicator_hooks(codex: str) -> int:
                 if hook.get("sourcePath") == str(HOOKS_FILE) and HOOK_MARKER in (hook.get("command") or ""):
                     discovered.append(hook)
 
-        if len(discovered) != len(HOOK_STATES):
+        if len(discovered) != len(CODEX_HOOKS):
             warnings = [warning for row in rows for warning in row.get("warnings", [])]
             errors = [error for row in rows for error in row.get("errors", [])]
             details = "; ".join(warnings + errors) or "без дополнительных диагностик"
             raise InstallError(
-                f"Codex обнаружил {len(discovered)} из {len(HOOK_STATES)} hooks ({details})"
+                f"Codex обнаружил {len(discovered)} из {len(CODEX_HOOKS)} hooks ({details})"
             )
 
         state = {
@@ -419,9 +459,10 @@ def main() -> int:
     if sys.platform != "darwin":
         raise InstallError("Индикатор предназначен только для macOS")
     codex = shutil.which("codex")
+    claude = shutil.which("claude")
     swift = shutil.which("swift")
-    if codex is None:
-        raise InstallError("Команда codex не найдена в PATH")
+    if codex is None and claude is None:
+        raise InstallError("Не найдены ни Codex, ни Claude Code; установите хотя бы один агент")
     if swift is None:
         raise InstallError("Swift toolchain не найден; установите Xcode Command Line Tools")
 
@@ -455,9 +496,19 @@ def main() -> int:
     print("5/9 Проверяю реальные LED и неизменность режима Caps Lock…")
     run([str(INSTALL_BIN), "self-test"])
 
-    print("6/9 Добавляю lifecycle hooks Codex, не меняя существующий notify…")
-    install_hooks()
-    hook_count = trust_indicator_hooks(codex)
+    print("6/9 Добавляю lifecycle hooks Codex и Claude Code, сохраняя чужие настройки…")
+    install_codex_hooks()
+    claude_hook_count = install_claude_hooks()
+    if codex is None:
+        codex_hook_count = 0
+        print("   Codex пока не найден; его hooks записаны, но после установки Codex запустите установщик повторно для доверия.")
+    else:
+        codex_hook_count = trust_indicator_hooks(codex)
+    if claude is None:
+        print("   Claude Code пока не найден; hooks уже готовы к его будущей установке.")
+    else:
+        version = run([claude, "--version"], check=False, capture=True).stdout.strip()
+        print(f"   Claude Code найден: {version or claude}")
 
     print("7/9 Запускаю фоновый индикатор из пользовательского контекста…")
     expected_pid = start_indicator()
@@ -485,10 +536,13 @@ def main() -> int:
         {
             "installedAt": datetime.now().astimezone().isoformat(),
             "binary": str(INSTALL_BIN),
-            "autostart": "Codex lifecycle hook",
-            "hooksFile": str(HOOKS_FILE),
+            "autostart": "Codex or Claude Code lifecycle hook",
+            "codexHooksFile": str(HOOKS_FILE),
+            "claudeSettingsFile": str(CLAUDE_SETTINGS_FILE),
             "backup": str(backup_dir),
-            "hookCount": hook_count,
+            "codexHookCount": codex_hook_count,
+            "codexHooksTrusted": codex is not None,
+            "claudeHookCount": claude_hook_count,
             "magSafePortPresent": mag_safe_port,
             "magSafeHelper": str(MAGSAFE_HELPER) if mag_safe_helper_hash else None,
             "magSafeHelperSHA256": mag_safe_helper_hash,

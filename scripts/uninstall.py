@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Remove the current user's Codex Caps Lock indicator installation."""
+"""Remove the current user's Codex and Claude Code hardware indicator."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ MAGSAFE_LABEL = "com.mikita.codex-capslock-indicator.magsafe"
 HOME = Path.home()
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", HOME / ".codex")).expanduser().resolve()
 HOOKS_FILE = CODEX_HOME / "hooks.json"
+CLAUDE_HOME = Path(os.environ.get("CLAUDE_CONFIG_DIR", HOME / ".claude")).expanduser().resolve()
+CLAUDE_SETTINGS_FILE = CLAUDE_HOME / "settings.json"
 INSTALL_BIN = HOME / ".local" / "bin" / "codex-capslock-indicator"
 LAUNCH_AGENT = HOME / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 MAGSAFE_HELPER = Path("/Library/PrivilegedHelperTools") / MAGSAFE_LABEL
@@ -43,10 +45,10 @@ def atomic_json_write(path: Path, value: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def remove_hooks() -> int:
-    if not HOOKS_FILE.exists():
+def remove_hooks(settings_file: Path) -> int:
+    if not settings_file.exists():
         return 0
-    document = json.loads(HOOKS_FILE.read_text(encoding="utf-8"))
+    document = json.loads(settings_file.read_text(encoding="utf-8"))
     hooks = document.get("hooks")
     if not isinstance(hooks, dict):
         return 0
@@ -80,7 +82,7 @@ def remove_hooks() -> int:
         else:
             hooks.pop(event_name, None)
 
-    atomic_json_write(HOOKS_FILE, document)
+    atomic_json_write(settings_file, document)
     return removed
 
 
@@ -157,12 +159,14 @@ def main() -> int:
         subprocess.run([str(INSTALL_BIN), "magsafe", "system"], check=False)
         subprocess.run([str(INSTALL_BIN), "led", "restore"], check=False)
     removed_magsafe = remove_magsafe_helper()
-    removed_hooks = remove_hooks()
+    removed_codex_hooks = remove_hooks(HOOKS_FILE)
+    removed_claude_hooks = remove_hooks(CLAUDE_SETTINGS_FILE)
     if INSTALL_BIN.exists():
         INSTALL_BIN.unlink()
     LAUNCH_AGENT.unlink(missing_ok=True)
 
-    print(f"Удалено hooks: {removed_hooks}")
+    print(f"Удалено hooks Codex: {removed_codex_hooks}")
+    print(f"Удалено hooks Claude Code: {removed_claude_hooks}")
     print(f"Помощник MagSafe: {'удалён' if removed_magsafe else 'не был установлен'}")
     print("Индикатор удалён; диагностические данные и резервные копии сохранены.")
     return 0

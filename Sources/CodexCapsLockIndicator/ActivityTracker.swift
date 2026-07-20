@@ -2,6 +2,7 @@ import Foundation
 
 struct SessionActivity: Sendable {
     var mode: IndicatorMode
+    var source: CodingAgent
     var turnID: String?
     var pendingInputCallID: String?
     var waitingStatusObserved: Bool
@@ -20,6 +21,10 @@ struct ActivityTracker: Sendable {
             acknowledgeCompleted()
             return
         }
+        if signal.hookEventName == Constants.legacyAcknowledgementEventName {
+            acknowledgeAllCompleted()
+            return
+        }
 
         if signal.state == .off {
             sessions.removeValue(forKey: signal.sessionID)
@@ -28,6 +33,7 @@ struct ActivityTracker: Sendable {
 
         sessions[signal.sessionID] = SessionActivity(
             mode: signal.state,
+            source: signal.source ?? .codex,
             turnID: signal.turnID,
             pendingInputCallID: nil,
             waitingStatusObserved: false,
@@ -40,6 +46,7 @@ struct ActivityTracker: Sendable {
         case let .turnStarted(sessionID, turnID):
             sessions[sessionID] = SessionActivity(
                 mode: .working,
+                source: .codex,
                 turnID: turnID,
                 pendingInputCallID: nil,
                 waitingStatusObserved: false,
@@ -54,6 +61,7 @@ struct ActivityTracker: Sendable {
             }
             sessions[sessionID] = SessionActivity(
                 mode: .done,
+                source: sessions[sessionID]?.source ?? .codex,
                 turnID: turnID,
                 pendingInputCallID: nil,
                 waitingStatusObserved: false,
@@ -63,6 +71,7 @@ struct ActivityTracker: Sendable {
         case let .waitingForInput(sessionID, callID):
             var activity = sessions[sessionID] ?? SessionActivity(
                 mode: .waiting,
+                source: .codex,
                 turnID: nil,
                 pendingInputCallID: nil,
                 waitingStatusObserved: false,
@@ -119,8 +128,23 @@ struct ActivityTracker: Sendable {
         sessions.removeAll(keepingCapacity: true)
     }
 
+    mutating func clearUnfinishedSessions(for source: CodingAgent? = nil) {
+        sessions = sessions.filter { _, activity in
+            activity.mode == .done || (source != nil && activity.source != source)
+        }
+    }
+
     @discardableResult
     mutating func acknowledgeCompleted() -> Bool {
+        guard let completedSessionID = firstCompletedSession?.key else {
+            return false
+        }
+        sessions.removeValue(forKey: completedSessionID)
+        return true
+    }
+
+    @discardableResult
+    mutating func acknowledgeAllCompleted() -> Bool {
         let completedSessionIDs = sessions.compactMap { sessionID, activity in
             activity.mode == .done ? sessionID : nil
         }
@@ -131,15 +155,34 @@ struct ActivityTracker: Sendable {
     }
 
     var effectiveMode: IndicatorMode {
-        if sessions.values.contains(where: { $0.mode == .working }) {
-            return .working
+        if firstCompletedSession != nil {
+            return .done
         }
         if sessions.values.contains(where: { $0.mode == .waiting }) {
             return .waiting
         }
-        if sessions.values.contains(where: { $0.mode == .done }) {
-            return .done
+        if sessions.values.contains(where: { $0.mode == .working }) {
+            return .working
         }
         return .off
+    }
+
+    var firstCompletedSource: CodingAgent? {
+        firstCompletedSession?.value.source
+    }
+
+    var firstCompletedSessionID: String? {
+        firstCompletedSession?.key
+    }
+
+    private var firstCompletedSession: (key: String, value: SessionActivity)? {
+        sessions
+            .filter { $0.value.mode == .done }
+            .min { lhs, rhs in
+                if lhs.value.updatedAt == rhs.value.updatedAt {
+                    return lhs.key < rhs.key
+                }
+                return lhs.value.updatedAt < rhs.value.updatedAt
+            }
     }
 }

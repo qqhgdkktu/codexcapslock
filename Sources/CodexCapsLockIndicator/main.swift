@@ -42,15 +42,23 @@ enum CodexCapsLockIndicatorMain {
             try IndicatorDaemon(paths: paths).run()
 
         case "hook":
-            guard arguments.count == 2, let state = IndicatorMode(rawValue: arguments[1]) else {
-                throw CommandError.invalidArguments("Использование: hook working|waiting|done|off")
+            guard (2...3).contains(arguments.count),
+                  let state = IndicatorMode(rawValue: arguments[1]),
+                  let source = CodingAgent(rawValue: arguments.count == 3 ? arguments[2] : "codex") else {
+                throw CommandError.invalidArguments(
+                    "Использование: hook working|waiting|done|off [codex|claude]"
+                )
             }
             let input = FileHandle.standardInput.readDataToEndOfFile()
             do {
-                try HookJournalWriter(paths: paths).append(state: state, inputData: input)
+                try HookJournalWriter(paths: paths).append(
+                    state: state,
+                    source: source,
+                    inputData: input
+                )
                 launchDaemonIfNeeded(paths: paths)
             } catch {
-                // Hooks must never block or fail a Codex turn if the indicator is unavailable.
+                // Hooks must never block or fail an agent turn if the indicator is unavailable.
                 exit(EXIT_SUCCESS)
             }
 
@@ -60,7 +68,7 @@ enum CodexCapsLockIndicatorMain {
         case "ack", "acknowledge":
             try HookJournalWriter(paths: paths).appendAcknowledgement()
             launchDaemonIfNeeded(paths: paths)
-            print("OK: завершённые задачи отмечены просмотренными.")
+            print("OK: первая завершённая задача отмечена просмотренной.")
 
         case "led":
             guard arguments.count == 2 else {
@@ -113,23 +121,24 @@ enum CodexCapsLockIndicatorMain {
 
         let labels: [IndicatorMode: String] = [
             .off: "выключен",
-            .working: "Codex работает — LED мигает",
-            .waiting: "Codex ждёт действия — LED горит",
-            .done: "Codex завершил работу — LED горит",
+            .working: "агент работает — LED мигает",
+            .waiting: "агент ждёт действия — LED горит",
+            .done: "агент завершил работу — LED горит",
         ]
         print("Состояние: \(labels[status.mode] ?? status.mode.rawValue)")
         print("Индикатор: \(status.output == .magSafe ? "MagSafe" : "Caps Lock")")
         print("Клавиатура: \(status.keyboardName ?? "не найдена")")
-        print("Индикация Codex: \(status.ledOn ? "активна" : "неактивна")")
+        print("Индикация агентов: \(status.ledOn ? "активна" : "неактивна")")
         let magSafeConnection = status.magSafeConnected ? "подключён" : "не подключён"
         let magSafeControl = status.magSafeControlAvailable ? "доступно" : "недоступно"
         print("MagSafe: \(magSafeConnection), управление \(magSafeControl)")
         print("Codex: \(status.codexProcessRunning ? "запущен" : "не запущен")")
+        print("Claude Code: \((status.claudeProcessRunning ?? false) ? "запущен" : "не запущен")")
         print("Активных сессий: \(status.activeSessions)")
         print("PID: \(status.pid)")
         if status.mode == .done {
             if status.output == .magSafe {
-                print("Сброс: откройте Codex или выполните команду ack; Caps Lock работает обычно.")
+                print("Сброс: откройте Codex для результата Codex или выполните ack; Caps Lock работает обычно.")
             } else {
                 print("Сброс: нажмите Caps Lock, откройте Codex или выполните команду ack.")
             }
@@ -137,6 +146,9 @@ enum CodexCapsLockIndicatorMain {
     }
 
     private static func launchDaemonIfNeeded(paths: RuntimePaths) {
+        if ProcessInfo.processInfo.environment["CODEX_CAPS_INDICATOR_DISABLE_DAEMON_AUTOSTART"] == "1" {
+            return
+        }
         guard !daemonLockIsHeld(paths: paths) else {
             return
         }
@@ -345,9 +357,9 @@ enum CodexCapsLockIndicatorMain {
 
         Команды:
           daemon              запустить фоновый индикатор
-          hook STATE          принять событие Codex (working/waiting/done/off)
+          hook STATE [AGENT]  принять событие Codex/Claude Code (working/waiting/done/off)
           status              показать текущее состояние
-          ack                 погасить уведомление о завершённых задачах
+          ack                 погасить первое уведомление в очереди завершений
           led on|off|restore  напрямую проверить LED
           inspect-led         показать LED и реальный режим Caps Lock
           inspect-magsafe     показать подключение и доступность MagSafe

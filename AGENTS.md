@@ -4,14 +4,14 @@ This file is the operational contract for AI agents working with this repository
 
 ## Purpose and supported environment
 
-This is a native macOS SwiftPM project that maps Codex lifecycle state to one hardware indicator at a time: a connected MagSafe 3 LED has priority, otherwise the built-in MacBook Caps Lock LED is used. It is supported on macOS 14 or newer and requires a built-in keyboard with a physical Caps Lock LED for fallback.
+This is a native macOS SwiftPM project that maps Codex and Claude Code lifecycle state to one hardware indicator at a time: a connected MagSafe 3 LED has priority, otherwise the built-in MacBook Caps Lock LED is used. It is supported on macOS 14 or newer and requires a built-in keyboard with a physical Caps Lock LED for fallback.
 
 The Caps Lock indicator controls raw HID LED output separately from logical Caps Lock. Preserve that invariant. When MagSafe is selected, Caps Lock must be entirely normal and must not be used as acknowledgement input.
 
 ## When asked to install or use it
 
-1. Confirm the host is macOS and `codex`, `swift`, and `python3` are available.
-2. Run the repository installer; do not manually rewrite `~/.codex/hooks.json`:
+1. Confirm the host is macOS, `swift` and `python3` are available, and at least one of `codex` or `claude` is available.
+2. Run the repository installer; do not manually rewrite `~/.codex/hooks.json` or `~/.claude/settings.json`:
 
    ```bash
    python3 scripts/install.py
@@ -28,7 +28,7 @@ The Caps Lock indicator controls raw HID LED output separately from logical Caps
 
 4. Report the installed version, selected output, MagSafe connection/control state, daemon PID, keyboard name, self-test result, helper hash when installed, and backup path printed by the installer.
 
-The installer modifies user Codex configuration and briefly exercises hardware. On a Mac with MagSafe 3, it also installs a root-owned C helper and LaunchDaemon after a protected macOS administrator dialog. Run it only when installation or live hardware verification is in scope. It preserves foreign hooks and the existing `notify` setting.
+The installer modifies user Codex and Claude Code configuration and briefly exercises hardware. On a Mac with MagSafe 3, it also installs a root-owned C helper and LaunchDaemon after a protected macOS administrator dialog. Run it only when installation or live hardware verification is in scope. It preserves foreign hooks, settings, and the existing `notify` setting.
 
 ## User controls agents should know
 
@@ -50,7 +50,7 @@ Do not use `hook`, `led`, `raw-led`, or `magsafe` as normal user commands. They 
 
 ## State contract
 
-Priority is `working` over `waiting` over `done` over `off`.
+Priority is the earliest `done` session, then `waiting`, then `working`, then `off`. Acknowledgement removes one completion at a time in completion order.
 
 | State | Selected LED contract |
 | --- | --- |
@@ -61,9 +61,9 @@ Priority is `working` over `waiting` over `done` over `off`.
 
 Output priority is strict: connected and controllable MagSafe, otherwise Caps Lock. MagSafe presence requires a physical type-17 port with `ConnectionActive` and current external power; generic USB-C charging must not count.
 
-Acknowledgement removes only completed sessions. It must never hide `working` or `waiting` sessions.
+Acknowledgement removes only the earliest completed session. It must never hide `working` or `waiting` sessions; after acknowledgement, expose the next completion or remaining actionable state.
 
-For `done` on the Caps Lock output, acknowledgement can come from Codex remaining frontmost, the `ack` command, or a physical Caps Lock transition. If that transition enabled logical Caps Lock, the daemon must immediately return logical Caps Lock to off and reconcile the physical LED. On MagSafe output, only Codex focus or `ack` may acknowledge; the Caps Lock key remains normal.
+For `done` on the Caps Lock output, acknowledgement can come from the `ack` command, a physical Caps Lock transition, or Codex remaining frontmost when the first completion belongs to Codex. If the key transition enabled logical Caps Lock, the daemon must immediately return logical Caps Lock to off and reconcile the physical LED. On MagSafe output, Caps Lock remains normal; Claude Code completion requires `ack` or activity resuming in that session because terminal focus is deliberately not monitored.
 
 ## Safety invariants
 
@@ -71,7 +71,7 @@ For `done` on the Caps Lock output, acknowledgement can come from Codex remainin
 - Never let notification state alter the user's typing case.
 - Never add a global keyboard event tap, keystroke logging, Accessibility permission, or Input Monitoring permission.
 - Never persist prompt text, assistant text, tool arguments, commands, or transcript paths in the indicator journal.
-- Never replace or delete foreign Codex hooks or the user's `notify` configuration.
+- Never replace or delete foreign Codex or Claude Code hooks, settings, or the user's `notify` configuration.
 - Never add windows, animations, network calls, analytics, or GPU work for this indicator.
 - On shutdown, installation failure, demo completion, or self-test completion, restore the LED to the actual logical Caps Lock state.
 - Always restore MagSafe to `system` on output change, shutdown, helper termination, demo completion, self-test completion, and uninstall.
@@ -118,9 +118,11 @@ Also verify:
 - the release and installed binary hashes match;
 - raw LED changes do not change logical Caps Lock;
 - SIGTERM or app exit restores the normal LED;
-- a real Codex lifecycle produces `working` and `done` hook records;
+- real Codex and Claude Code lifecycles produce source-tagged `working` and `done` hook records, with Claude session IDs namespaced away from Codex IDs;
 - CPU and physical footprint have not materially regressed;
 - connected MagSafe selects only MagSafe; unplugging restores system MagSafe and selects only Caps Lock;
 - the root helper blocks in `accept`, has no polling loop, and rejects a non-console peer.
+
+If a usable Claude Code account is unavailable, `MultiAgentLifecycleTests` is the required fallback: it replays official Claude hook JSON through the real journal writer/reader and verifies first-completion priority alongside a Codex session. Also run `python3 -m unittest discover -s scripts/tests` to validate idempotent, foreign-setting-preserving hook installation. State clearly that a live Claude `Stop` event remains unverified.
 
 Do not claim the task complete while required tests, GitHub Actions, or an explicitly requested push are pending.

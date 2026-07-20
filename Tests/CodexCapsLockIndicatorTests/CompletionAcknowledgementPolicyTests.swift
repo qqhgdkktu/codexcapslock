@@ -91,3 +91,38 @@ func capsLockDoesNotAcknowledgeWithMagSafe() {
         at: start.addingTimeInterval(1)
     ) == nil)
 }
+
+@Test("a queued completion receives its own visibility dwell")
+func queuedCompletionResetsFocusDwell() {
+    let start = Date()
+    var policy = CompletionAcknowledgementPolicy(initialCapsLockState: false)
+
+    #expect(policy.observe(
+        mode: .done,
+        completionID: "first",
+        codexFrontmost: true,
+        actualCapsLockState: false,
+        at: start
+    ) == nil)
+    #expect(policy.observe(
+        mode: .done,
+        completionID: "first",
+        codexFrontmost: true,
+        actualCapsLockState: false,
+        at: start.addingTimeInterval(2)
+    ) == .codexViewed)
+    #expect(policy.observe(
+        mode: .done,
+        completionID: "second",
+        codexFrontmost: true,
+        actualCapsLockState: false,
+        at: start.addingTimeInterval(2)
+    ) == nil)
+    #expect(policy.observe(
+        mode: .done,
+        completionID: "second",
+        codexFrontmost: true,
+        actualCapsLockState: false,
+        at: start.addingTimeInterval(4)
+    ) == .codexViewed)
+}

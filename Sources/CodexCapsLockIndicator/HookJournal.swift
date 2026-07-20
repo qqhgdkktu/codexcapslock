@@ -10,16 +10,17 @@ enum HookJournalError: Error {
 struct HookJournalWriter {
     let paths: RuntimePaths
 
-    func append(state: IndicatorMode, inputData: Data) throws {
+    func append(state: IndicatorMode, source: CodingAgent, inputData: Data) throws {
         try paths.prepare()
 
         let input = (try? JSONDecoder().decode(HookInput.self, from: inputData))
         let signal = HookSignal(
             state: state,
-            sessionID: input?.sessionID ?? "unknown",
+            sessionID: source.scopedSessionID(input?.sessionID),
             turnID: input?.turnID,
             hookEventName: input?.hookEventName,
-            timestamp: Date()
+            timestamp: Date(),
+            source: source
         )
 
         try append(signal)
@@ -32,7 +33,8 @@ struct HookJournalWriter {
             sessionID: "*",
             turnID: nil,
             hookEventName: Constants.acknowledgementEventName,
-            timestamp: Date()
+            timestamp: Date(),
+            source: .codex
         ))
     }
 

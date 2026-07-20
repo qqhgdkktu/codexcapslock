@@ -7,12 +7,45 @@ enum IndicatorMode: String, Codable, Sendable {
     case done
 }
 
+enum CodingAgent: String, Codable, Sendable {
+    case codex
+    case claude
+
+    func scopedSessionID(_ sessionID: String?) -> String {
+        let value = sessionID ?? "unknown"
+        switch self {
+        case .codex:
+            return value
+        case .claude:
+            return "claude:\(value)"
+        }
+    }
+}
+
 struct HookSignal: Codable, Sendable {
     let state: IndicatorMode
     let sessionID: String
     let turnID: String?
     let hookEventName: String?
     let timestamp: Date
+    // Optional keeps journals written by versions before Claude Code support readable.
+    let source: CodingAgent?
+
+    init(
+        state: IndicatorMode,
+        sessionID: String,
+        turnID: String?,
+        hookEventName: String?,
+        timestamp: Date,
+        source: CodingAgent = .codex
+    ) {
+        self.state = state
+        self.sessionID = sessionID
+        self.turnID = turnID
+        self.hookEventName = hookEventName
+        self.timestamp = timestamp
+        self.source = source
+    }
 }
 
 struct HookInput: Decodable {
@@ -40,6 +73,7 @@ struct DaemonStatus: Codable, Sendable {
     let magSafeLEDMode: MagSafeLEDMode?
     let activeSessions: Int
     let codexProcessRunning: Bool
+    let claudeProcessRunning: Bool?
     let updatedAt: Date
     let version: String
 }
@@ -53,7 +87,7 @@ enum TranscriptEvent: Equatable, Sendable {
 }
 
 enum Constants {
-    static let version = "1.2.0"
+    static let version = "1.3.0"
     static let blinkHalfPeriod: TimeInterval = 0.5
     static let tickInterval: TimeInterval = 0.25
     static let magSafeConnectionPollInterval: TimeInterval = 1.0
@@ -65,7 +99,8 @@ enum Constants {
     static let statusRefreshInterval: TimeInterval = 30.0
     static let minimumDoneVisibility: TimeInterval = 2.0
     static let codexFocusAcknowledgementDelay: TimeInterval = 1.0
-    static let acknowledgementEventName = "CodexCapsLockAcknowledge"
+    static let acknowledgementEventName = "CodexCapsLockAcknowledgeNext"
+    static let legacyAcknowledgementEventName = "CodexCapsLockAcknowledge"
     static let codexBundleIdentifier = "com.openai.codex"
 }
 

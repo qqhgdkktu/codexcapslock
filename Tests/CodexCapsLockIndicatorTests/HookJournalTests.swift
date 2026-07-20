@@ -20,7 +20,7 @@ func hookJournalRoundTrip() throws {
     {"session_id":"session","turn_id":"turn","transcript_path":"/tmp/rollout.jsonl","hook_event_name":"UserPromptSubmit","prompt":"secret prompt"}
     """.utf8)
 
-    try HookJournalWriter(paths: paths).append(state: .working, inputData: input)
+    try HookJournalWriter(paths: paths).append(state: .working, source: .codex, inputData: input)
     let signals = HookJournalReader(url: paths.eventJournal).readNewSignals()
 
     #expect(signals.count == 1)
@@ -31,6 +31,38 @@ func hookJournalRoundTrip() throws {
     let persisted = try String(contentsOf: paths.eventJournal, encoding: .utf8)
     #expect(!persisted.contains("secret prompt"))
     #expect(!persisted.contains("rollout.jsonl"))
+}
+
+@Test("Claude hook schema is namespaced and remains privacy-limited")
+func claudeHookJournalRoundTrip() throws {
+    let temporary = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: temporary) }
+
+    let paths = RuntimePaths(
+        baseDirectory: temporary,
+        eventJournal: temporary.appendingPathComponent("events.jsonl"),
+        statusFile: temporary.appendingPathComponent("status.json"),
+        codexHome: temporary.appendingPathComponent("codex"),
+        sessionsDirectory: temporary.appendingPathComponent("sessions"),
+        logsDatabase: temporary.appendingPathComponent("logs.sqlite")
+    )
+    let input = Data("""
+    {"session_id":"same-id","transcript_path":"/tmp/claude.jsonl","cwd":"/private/project","permission_mode":"default","hook_event_name":"Stop","last_assistant_message":"private answer"}
+    """.utf8)
+
+    try HookJournalWriter(paths: paths).append(state: .done, source: .claude, inputData: input)
+    let signals = HookJournalReader(url: paths.eventJournal).readNewSignals()
+
+    #expect(signals.count == 1)
+    #expect(signals[0].sessionID == "claude:same-id")
+    #expect(signals[0].source == .claude)
+    #expect(signals[0].hookEventName == "Stop")
+
+    let persisted = try String(contentsOf: paths.eventJournal, encoding: .utf8)
+    #expect(!persisted.contains("private answer"))
+    #expect(!persisted.contains("claude.jsonl"))
+    #expect(!persisted.contains("/private/project"))
 }
 
 @Test("acknowledgement is persisted as a metadata-only control signal")

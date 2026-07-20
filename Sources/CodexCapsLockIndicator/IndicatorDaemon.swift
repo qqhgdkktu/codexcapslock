@@ -24,6 +24,7 @@ private struct DaemonStatusFingerprint: Equatable {
     let magSafeLEDMode: MagSafeLEDMode?
     let activeSessions: Int
     let codexProcessRunning: Bool
+    let claudeProcessRunning: Bool
 }
 
 final class IndicatorDaemon: @unchecked Sendable {
@@ -34,7 +35,7 @@ final class IndicatorDaemon: @unchecked Sendable {
     private let journalWriter: HookJournalWriter
     private let transcripts: TranscriptMonitor
     private let logWatcher: CodexLogWatcher
-    private let processDetector = CodexProcessDetector()
+    private let processDetector = CodingAgentProcessDetector()
     private let applicationMonitor = CodexApplicationMonitor()
     private let magSafeConnectionDetector = MagSafeConnectionDetector()
     private let magSafeLED = MagSafeLEDController()
@@ -52,8 +53,9 @@ final class IndicatorDaemon: @unchecked Sendable {
     private var lastMagSafeProbe = Date.distantPast
     private var lastStatusFingerprint: DaemonStatusFingerprint?
     private var codexRunning = false
-    private var processWasSeen = false
-    private var processAbsentSince: Date?
+    private var claudeRunning = false
+    private var codexAbsentSince: Date?
+    private var claudeAbsentSince: Date?
     private var ledOn = false
     private var blinkOn = true
     private var output: IndicatorOutput = .capsLock
@@ -120,6 +122,13 @@ final class IndicatorDaemon: @unchecked Sendable {
         // Lifecycle hooks are authoritative and therefore applied after fallback sources.
         for signal in journal.readNewSignals() {
             tracker.apply(signal)
+            if signal.hookEventName != Constants.acknowledgementEventName
+                && signal.hookEventName != Constants.legacyAcknowledgementEventName {
+                switch signal.source ?? .codex {
+                case .codex: codexAbsentSince = nil
+                case .claude: claudeAbsentSince = nil
+                }
+            }
         }
 
         if now.timeIntervalSince(lastProcessCheck) >= Constants.processPollInterval {
@@ -130,9 +139,12 @@ final class IndicatorDaemon: @unchecked Sendable {
 
         var actualCapsLockState = led.actualCapsLockState
         let modeBeforeAcknowledgement = tracker.effectiveMode
-        let codexFrontmost = modeBeforeAcknowledgement == .done && applicationMonitor.isFrontmost
+        let codexFrontmost = modeBeforeAcknowledgement == .done
+            && tracker.firstCompletedSource == .codex
+            && applicationMonitor.isFrontmost
         if let reason = acknowledgementPolicy.observe(
             mode: modeBeforeAcknowledgement,
+            completionID: tracker.firstCompletedSessionID,
             codexFrontmost: codexFrontmost,
             actualCapsLockState: actualCapsLockState,
             capsLockAcknowledgementEnabled: output == .capsLock,
@@ -148,6 +160,7 @@ final class IndicatorDaemon: @unchecked Sendable {
                 acknowledgeCompleted()
                 _ = acknowledgementPolicy.observe(
                     mode: tracker.effectiveMode,
+                    completionID: tracker.firstCompletedSessionID,
                     codexFrontmost: codexFrontmost,
                     actualCapsLockState: actualCapsLockState,
                     capsLockAcknowledgementEnabled: output == .capsLock,
@@ -163,30 +176,48 @@ final class IndicatorDaemon: @unchecked Sendable {
     }
 
     private func updateProcessState(now: Date) {
-        codexRunning = processDetector.isRunning()
+        let processState = processDetector.snapshot()
+        codexRunning = processState.codexRunning
+        claudeRunning = processState.claudeRunning
         if codexRunning {
-            processWasSeen = true
-            processAbsentSince = nil
-            return
+            codexAbsentSince = nil
+        } else {
+            codexAbsentSince = codexAbsentSince ?? now
+            if now.timeIntervalSince(codexAbsentSince ?? now) >= 5 {
+                tracker.clearUnfinishedSessions(for: .codex)
+            }
         }
 
-        if processAbsentSince == nil {
-            processAbsentSince = now
+        if claudeRunning {
+            claudeAbsentSince = nil
+        } else {
+            claudeAbsentSince = claudeAbsentSince ?? now
+            if now.timeIntervalSince(claudeAbsentSince ?? now) >= 5 {
+                tracker.clearUnfinishedSessions(for: .claude)
+            }
         }
 
-        let absence = now.timeIntervalSince(processAbsentSince ?? now)
-        if processWasSeen, absence >= 5 {
+        if !processState.anyRunning,
+           tracker.sessions.isEmpty,
+           now.timeIntervalSince(startedAt) >= 5 {
             shutdown()
-        } else if !processWasSeen, now.timeIntervalSince(startedAt) >= 2 {
-            tracker.clear()
         }
     }
 
     private func acknowledgeCompleted() {
-        guard tracker.acknowledgeCompleted() else {
+        guard tracker.firstCompletedSource != nil else {
             return
         }
-        try? journalWriter.appendAcknowledgement()
+        do {
+            try journalWriter.appendAcknowledgement()
+            // Consume the journal marker here so the same acknowledgement is not
+            // applied again on the next scheduler tick.
+            for signal in journal.readNewSignals() {
+                tracker.apply(signal)
+            }
+        } catch {
+            _ = tracker.acknowledgeCompleted()
+        }
     }
 
     private func updateMagSafeState(now: Date) {
@@ -308,7 +339,8 @@ final class IndicatorDaemon: @unchecked Sendable {
             magSafeControlAvailable: magSafeControlAvailable,
             magSafeLEDMode: appliedMagSafeMode,
             activeSessions: tracker.sessions.count,
-            codexProcessRunning: codexRunning
+            codexProcessRunning: codexRunning,
+            claudeProcessRunning: claudeRunning
         )
         guard force
                 || fingerprint != lastStatusFingerprint
@@ -329,6 +361,7 @@ final class IndicatorDaemon: @unchecked Sendable {
             magSafeLEDMode: appliedMagSafeMode,
             activeSessions: tracker.sessions.count,
             codexProcessRunning: codexRunning,
+            claudeProcessRunning: claudeRunning,
             updatedAt: now,
             version: Constants.version
         )
