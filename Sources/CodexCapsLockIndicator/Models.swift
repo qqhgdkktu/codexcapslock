@@ -48,10 +48,17 @@ enum TranscriptEvent: Equatable, Sendable {
 }
 
 enum Constants {
-    static let version = "1.0.0"
+    static let version = "1.1.0"
     static let blinkHalfPeriod: TimeInterval = 0.5
-    static let tickInterval: TimeInterval = 0.1
-    static let statusRefreshInterval: TimeInterval = 1.0
+    static let tickInterval: TimeInterval = 0.25
+    static let transcriptPollInterval: TimeInterval = 0.5
+    static let logPollInterval: TimeInterval = 1.0
+    static let processPollInterval: TimeInterval = 5.0
+    static let statusRefreshInterval: TimeInterval = 30.0
+    static let minimumDoneVisibility: TimeInterval = 2.0
+    static let codexFocusAcknowledgementDelay: TimeInterval = 1.0
+    static let acknowledgementEventName = "CodexCapsLockAcknowledge"
+    static let codexBundleIdentifier = "com.openai.codex"
 }
 
 struct RuntimePaths: Sendable {

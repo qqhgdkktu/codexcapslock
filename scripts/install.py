@@ -161,7 +161,7 @@ class AppServerClient:
                 "clientInfo": {
                     "name": "codex_capslock_indicator_installer",
                     "title": "Codex Caps Lock Indicator Installer",
-                    "version": "1.0.0",
+                    "version": "1.1.0",
                 }
             },
         )

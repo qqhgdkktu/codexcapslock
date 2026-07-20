@@ -68,3 +68,50 @@ func ignoresOldCompletion() {
     tracker.apply(.turnCompleted(sessionID: "session", turnID: "new"))
     #expect(tracker.effectiveMode == .done)
 }
+
+@Test("acknowledgement clears only completed sessions")
+func acknowledgementPreservesActionableSessions() {
+    var tracker = ActivityTracker()
+    let now = Date()
+    tracker.apply(HookSignal(
+        state: .done,
+        sessionID: "done",
+        turnID: "1",
+        hookEventName: "Stop",
+        timestamp: now
+    ))
+    tracker.apply(HookSignal(
+        state: .waiting,
+        sessionID: "waiting",
+        turnID: "2",
+        hookEventName: "PermissionRequest",
+        timestamp: now
+    ))
+
+    let didAcknowledge = tracker.acknowledgeCompleted()
+    #expect(didAcknowledge)
+    #expect(tracker.sessions["done"] == nil)
+    #expect(tracker.sessions["waiting"]?.mode == .waiting)
+}
+
+@Test("journal acknowledgement signal clears completed work")
+func acknowledgementSignal() {
+    var tracker = ActivityTracker()
+    let now = Date()
+    tracker.apply(HookSignal(
+        state: .done,
+        sessionID: "session",
+        turnID: "turn",
+        hookEventName: "Stop",
+        timestamp: now
+    ))
+    tracker.apply(HookSignal(
+        state: .off,
+        sessionID: "*",
+        turnID: nil,
+        hookEventName: Constants.acknowledgementEventName,
+        timestamp: now
+    ))
+
+    #expect(tracker.effectiveMode == .off)
+}

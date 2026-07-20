@@ -3,6 +3,7 @@ import Foundation
 
 final class HIDCapsLockController {
     private let rawController = RawHIDCapsLockController()
+    private let modifierController = CapsLockModifierController()
 
     var keyboardName: String? {
         builtInTarget?.product
@@ -36,6 +37,11 @@ final class HIDCapsLockController {
     @discardableResult
     func restoreActualCapsLockIndicator() -> Bool {
         setIndicator(actualCapsLockState)
+    }
+
+    @discardableResult
+    func setActualCapsLockState(_ enabled: Bool) -> Bool {
+        modifierController.setEnabled(enabled)
     }
 
     private var builtInTarget: RawHIDLEDTarget? {

@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  swift:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - name: Show Swift version
+        run: swift --version
+      - name: Run tests
+        run: swift test
+      - name: Build release binary
+        run: swift build -c release

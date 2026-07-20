@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 private enum CommandError: Error, CustomStringConvertible {
@@ -43,7 +44,7 @@ enum CodexCapsLockIndicatorMain {
             let input = FileHandle.standardInput.readDataToEndOfFile()
             do {
                 try HookJournalWriter(paths: paths).append(state: state, inputData: input)
-                launchDaemonIfNeeded()
+                launchDaemonIfNeeded(paths: paths)
             } catch {
                 // Hooks must never block or fail a Codex turn if the indicator is unavailable.
                 exit(EXIT_SUCCESS)
@@ -51,6 +52,11 @@ enum CodexCapsLockIndicatorMain {
 
         case "status":
             try printStatus(paths: paths)
+
+        case "ack", "acknowledge":
+            try HookJournalWriter(paths: paths).appendAcknowledgement()
+            launchDaemonIfNeeded(paths: paths)
+            print("OK: завершённые задачи отмечены просмотренными.")
 
         case "led":
             guard arguments.count == 2 else {
@@ -102,9 +108,16 @@ enum CodexCapsLockIndicatorMain {
         print("Codex: \(status.codexProcessRunning ? "запущен" : "не запущен")")
         print("Активных сессий: \(status.activeSessions)")
         print("PID: \(status.pid)")
+        if status.mode == .done {
+            print("Сброс: нажмите Caps Lock, откройте Codex или выполните команду ack.")
+        }
     }
 
-    private static func launchDaemonIfNeeded() {
+    private static func launchDaemonIfNeeded(paths: RuntimePaths) {
+        guard !daemonLockIsHeld(paths: paths) else {
+            return
+        }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
         process.arguments = ["daemon"]
@@ -112,6 +125,20 @@ enum CodexCapsLockIndicatorMain {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try? process.run()
+    }
+
+    private static func daemonLockIsHeld(paths: RuntimePaths) -> Bool {
+        let descriptor = open(paths.lockFile.path, O_RDWR | O_CREAT, 0o600)
+        guard descriptor >= 0 else {
+            return false
+        }
+        defer { close(descriptor) }
+
+        if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+            _ = flock(descriptor, LOCK_UN)
+            return false
+        }
+        return errno == EWOULDBLOCK || errno == EAGAIN
     }
 
     private static func setLED(_ value: String) throws {
@@ -214,6 +241,7 @@ enum CodexCapsLockIndicatorMain {
           daemon              запустить фоновый индикатор
           hook STATE          принять событие Codex (working/waiting/done/off)
           status              показать текущее состояние
+          ack                 погасить уведомление о завершённых задачах
           led on|off|restore  напрямую проверить LED
           inspect-led         показать LED и реальный режим Caps Lock
           raw-led on|off      экспериментальный прямой HID output-report

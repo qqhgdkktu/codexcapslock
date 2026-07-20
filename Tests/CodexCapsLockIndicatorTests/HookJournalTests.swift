@@ -32,3 +32,26 @@ func hookJournalRoundTrip() throws {
     #expect(!persisted.contains("secret prompt"))
     #expect(!persisted.contains("rollout.jsonl"))
 }
+
+@Test("acknowledgement is persisted as a metadata-only control signal")
+func acknowledgementJournalRoundTrip() throws {
+    let temporary = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: temporary) }
+
+    let paths = RuntimePaths(
+        baseDirectory: temporary,
+        eventJournal: temporary.appendingPathComponent("events.jsonl"),
+        statusFile: temporary.appendingPathComponent("status.json"),
+        codexHome: temporary.appendingPathComponent("codex"),
+        sessionsDirectory: temporary.appendingPathComponent("sessions"),
+        logsDatabase: temporary.appendingPathComponent("logs.sqlite")
+    )
+
+    try HookJournalWriter(paths: paths).appendAcknowledgement()
+    let signals = HookJournalReader(url: paths.eventJournal).readNewSignals()
+
+    #expect(signals.count == 1)
+    #expect(signals[0].hookEventName == Constants.acknowledgementEventName)
+    #expect(signals[0].state == .off)
+}

@@ -22,6 +22,21 @@ struct HookJournalWriter {
             timestamp: Date()
         )
 
+        try append(signal)
+    }
+
+    func appendAcknowledgement() throws {
+        try paths.prepare()
+        try append(HookSignal(
+            state: .off,
+            sessionID: "*",
+            turnID: nil,
+            hookEventName: Constants.acknowledgementEventName,
+            timestamp: Date()
+        ))
+    }
+
+    private func append(_ signal: HookSignal) throws {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         var data = try encoder.encode(signal)

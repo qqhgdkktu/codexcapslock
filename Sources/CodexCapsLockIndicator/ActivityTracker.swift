@@ -16,6 +16,11 @@ struct ActivityTracker: Sendable {
             return
         }
 
+        if signal.hookEventName == Constants.acknowledgementEventName {
+            acknowledgeCompleted()
+            return
+        }
+
         if signal.state == .off {
             sessions.removeValue(forKey: signal.sessionID)
             return
@@ -112,6 +117,17 @@ struct ActivityTracker: Sendable {
 
     mutating func clear() {
         sessions.removeAll(keepingCapacity: true)
+    }
+
+    @discardableResult
+    mutating func acknowledgeCompleted() -> Bool {
+        let completedSessionIDs = sessions.compactMap { sessionID, activity in
+            activity.mode == .done ? sessionID : nil
+        }
+        for sessionID in completedSessionIDs {
+            sessions.removeValue(forKey: sessionID)
+        }
+        return !completedSessionIDs.isEmpty
     }
 
     var effectiveMode: IndicatorMode {

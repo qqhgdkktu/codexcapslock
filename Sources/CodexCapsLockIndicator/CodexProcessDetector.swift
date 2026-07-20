@@ -1,7 +1,32 @@
+import AppKit
 import Foundation
 
+struct CodexApplicationMonitor {
+    var isRunning: Bool {
+        !NSRunningApplication.runningApplications(
+            withBundleIdentifier: Constants.codexBundleIdentifier
+        ).isEmpty
+    }
+
+    var isFrontmost: Bool {
+        let query = {
+            NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Constants.codexBundleIdentifier
+        }
+        if Thread.isMainThread {
+            return query()
+        }
+        return DispatchQueue.main.sync(execute: query)
+    }
+}
+
 struct CodexProcessDetector {
+    private let applicationMonitor = CodexApplicationMonitor()
+
     func isRunning() -> Bool {
+        if applicationMonitor.isRunning {
+            return true
+        }
+
         let process = Process()
         let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")

@@ -32,36 +32,58 @@ final class TranscriptMonitor {
     }
 
     private func discoverFiles(now: Date) {
-        guard let enumerator = FileManager.default.enumerator(
-            at: sessionsDirectory,
-            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return
+        for directory in recentDayDirectories(now: now) {
+            guard let urls = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                continue
+            }
+
+            for url in urls where url.pathExtension == "jsonl" {
+                guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                      values.isRegularFile == true,
+                      let modifiedAt = values.contentModificationDate else {
+                    continue
+                }
+
+                if var existing = files[url] {
+                    existing.modifiedAt = modifiedAt
+                    files[url] = existing
+                    continue
+                }
+
+                guard now.timeIntervalSince(modifiedAt) <= initialLookback else {
+                    continue
+                }
+                files[url] = TranscriptFileState(
+                    offset: 0,
+                    remainder: Data(),
+                    sessionID: sessionIDFromFilename(url),
+                    modifiedAt: modifiedAt
+                )
+            }
         }
+    }
 
-        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-            guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
-                  values.isRegularFile == true,
-                  let modifiedAt = values.contentModificationDate else {
-                continue
+    private func recentDayDirectories(now: Date) -> [URL] {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        return [0, -1].compactMap { dayOffset in
+            guard let date = calendar.date(byAdding: .day, value: dayOffset, to: now) else {
+                return nil
             }
-
-            if var existing = files[url] {
-                existing.modifiedAt = modifiedAt
-                files[url] = existing
-                continue
+            let components = calendar.dateComponents([.year, .month, .day], from: date)
+            guard let year = components.year,
+                  let month = components.month,
+                  let day = components.day else {
+                return nil
             }
-
-            guard now.timeIntervalSince(modifiedAt) <= initialLookback else {
-                continue
-            }
-            files[url] = TranscriptFileState(
-                offset: 0,
-                remainder: Data(),
-                sessionID: sessionIDFromFilename(url),
-                modifiedAt: modifiedAt
-            )
+            return sessionsDirectory
+                .appendingPathComponent(String(format: "%04d", year), isDirectory: true)
+                .appendingPathComponent(String(format: "%02d", month), isDirectory: true)
+                .appendingPathComponent(String(format: "%02d", day), isDirectory: true)
         }
     }
 

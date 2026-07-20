@@ -13,15 +13,26 @@ enum IndicatorDaemonError: Error, CustomStringConvertible {
     }
 }
 
+private struct DaemonStatusFingerprint: Equatable {
+    let mode: IndicatorMode
+    let keyboardAvailable: Bool
+    let keyboardName: String?
+    let activeSessions: Int
+    let codexProcessRunning: Bool
+}
+
 final class IndicatorDaemon: @unchecked Sendable {
     private let paths: RuntimePaths
     private let queue = DispatchQueue(label: "com.mikita.codex-capslock-indicator")
-    private let led = HIDCapsLockController()
+    private let led: HIDCapsLockController
     private let journal: HookJournalReader
+    private let journalWriter: HookJournalWriter
     private let transcripts: TranscriptMonitor
     private let logWatcher: CodexLogWatcher
     private let processDetector = CodexProcessDetector()
+    private let applicationMonitor = CodexApplicationMonitor()
     private var tracker = ActivityTracker()
+    private var acknowledgementPolicy: CompletionAcknowledgementPolicy
     private var timer: DispatchSourceTimer?
     private var signalSources: [DispatchSourceSignal] = []
     private var startedAt = Date()
@@ -30,19 +41,27 @@ final class IndicatorDaemon: @unchecked Sendable {
     private var lastProcessCheck = Date.distantPast
     private var lastLogCheck = Date.distantPast
     private var lastTranscriptCheck = Date.distantPast
+    private var lastStatusFingerprint: DaemonStatusFingerprint?
     private var codexRunning = false
     private var processWasSeen = false
     private var processAbsentSince: Date?
     private var ledOn = false
     private var blinkOn = true
+    private var forceActualLEDRestoreUntil: Date?
     private var stopping = false
     private var lockDescriptor: Int32 = -1
 
     init(paths: RuntimePaths) {
         self.paths = paths
+        let led = HIDCapsLockController()
+        self.led = led
         journal = HookJournalReader(url: paths.eventJournal)
+        journalWriter = HookJournalWriter(paths: paths)
         transcripts = TranscriptMonitor(sessionsDirectory: paths.sessionsDirectory)
         logWatcher = CodexLogWatcher(databaseURL: paths.logsDatabase)
+        acknowledgementPolicy = CompletionAcknowledgementPolicy(
+            initialCapsLockState: led.actualCapsLockState
+        )
     }
 
     func run() throws -> Never {
@@ -58,7 +77,9 @@ final class IndicatorDaemon: @unchecked Sendable {
         }
         self.timer = timer
         timer.resume()
-        dispatchMain()
+        while true {
+            _ = RunLoop.main.run(mode: .default, before: .distantFuture)
+        }
     }
 
     private func tick() {
@@ -67,33 +88,58 @@ final class IndicatorDaemon: @unchecked Sendable {
         }
 
         let now = Date()
-        for signal in journal.readNewSignals() {
-            tracker.apply(signal)
-        }
-        if now.timeIntervalSince(lastTranscriptCheck) >= 0.25 {
+        if now.timeIntervalSince(lastTranscriptCheck) >= Constants.transcriptPollInterval {
             for event in transcripts.poll(now: now) {
                 tracker.apply(event, at: now)
             }
             lastTranscriptCheck = now
         }
-        if now.timeIntervalSince(lastLogCheck) >= 0.25 {
+        if now.timeIntervalSince(lastLogCheck) >= Constants.logPollInterval {
             for _ in 0..<logWatcher.pollThreadStatusChangeCount() {
                 tracker.noteThreadStatusChanged(at: now)
             }
             lastLogCheck = now
         }
+        // Lifecycle hooks are authoritative and therefore applied after fallback sources.
+        for signal in journal.readNewSignals() {
+            tracker.apply(signal)
+        }
 
-        if now.timeIntervalSince(lastProcessCheck) >= 2.0 {
+        if now.timeIntervalSince(lastProcessCheck) >= Constants.processPollInterval {
             updateProcessState(now: now)
             lastProcessCheck = now
         }
 
-        applyLED(for: tracker.effectiveMode, now: now)
-
-        if now.timeIntervalSince(lastStatusWrite) >= Constants.statusRefreshInterval {
-            writeStatus(now: now)
-            lastStatusWrite = now
+        var actualCapsLockState = led.actualCapsLockState
+        let modeBeforeAcknowledgement = tracker.effectiveMode
+        let codexFrontmost = modeBeforeAcknowledgement == .done && applicationMonitor.isFrontmost
+        if let reason = acknowledgementPolicy.observe(
+            mode: modeBeforeAcknowledgement,
+            codexFrontmost: codexFrontmost,
+            actualCapsLockState: actualCapsLockState,
+            at: now
+        ) {
+            if reason != .capsLockKey
+                || !actualCapsLockState
+                || led.setActualCapsLockState(false) {
+                if reason == .capsLockKey {
+                    actualCapsLockState = false
+                    forceActualLEDRestoreUntil = now.addingTimeInterval(1)
+                }
+                acknowledgeCompleted()
+                _ = acknowledgementPolicy.observe(
+                    mode: tracker.effectiveMode,
+                    codexFrontmost: codexFrontmost,
+                    actualCapsLockState: actualCapsLockState,
+                    at: now
+                )
+            }
         }
+
+        let effectiveMode = tracker.effectiveMode
+        applyLED(for: effectiveMode, actualCapsLockState: actualCapsLockState, now: now)
+
+        writeStatusIfNeeded(mode: effectiveMode, now: now)
     }
 
     private func updateProcessState(now: Date) {
@@ -116,7 +162,18 @@ final class IndicatorDaemon: @unchecked Sendable {
         }
     }
 
-    private func applyLED(for mode: IndicatorMode, now: Date) {
+    private func acknowledgeCompleted() {
+        guard tracker.acknowledgeCompleted() else {
+            return
+        }
+        try? journalWriter.appendAcknowledgement()
+    }
+
+    private func applyLED(
+        for mode: IndicatorMode,
+        actualCapsLockState: Bool,
+        now: Date
+    ) {
         switch mode {
         case .working:
             if now.timeIntervalSince(lastBlinkTransition) >= Constants.blinkHalfPeriod {
@@ -133,9 +190,13 @@ final class IndicatorDaemon: @unchecked Sendable {
             }
 
         case .off:
-            let actual = led.actualCapsLockState
-            if ledOn != actual {
-                setLED(actual)
+            if let restoreUntil = forceActualLEDRestoreUntil {
+                setLED(actualCapsLockState)
+                if now >= restoreUntil {
+                    forceActualLEDRestoreUntil = nil
+                }
+            } else if ledOn != actualCapsLockState {
+                setLED(actualCapsLockState)
             }
         }
     }
@@ -146,10 +207,23 @@ final class IndicatorDaemon: @unchecked Sendable {
         }
     }
 
-    private func writeStatus(now: Date) {
+    private func writeStatusIfNeeded(mode: IndicatorMode, now: Date, force: Bool = false) {
+        let fingerprint = DaemonStatusFingerprint(
+            mode: mode,
+            keyboardAvailable: led.isAvailable,
+            keyboardName: led.keyboardName,
+            activeSessions: tracker.sessions.count,
+            codexProcessRunning: codexRunning
+        )
+        guard force
+                || fingerprint != lastStatusFingerprint
+                || now.timeIntervalSince(lastStatusWrite) >= Constants.statusRefreshInterval else {
+            return
+        }
+
         let status = DaemonStatus(
             pid: getpid(),
-            mode: tracker.effectiveMode,
+            mode: mode,
             ledOn: ledOn,
             keyboardAvailable: led.isAvailable,
             keyboardName: led.keyboardName,
@@ -165,7 +239,13 @@ final class IndicatorDaemon: @unchecked Sendable {
         guard let data = try? encoder.encode(status) else {
             return
         }
-        try? data.write(to: paths.statusFile, options: .atomic)
+        do {
+            try data.write(to: paths.statusFile, options: .atomic)
+        } catch {
+            return
+        }
+        lastStatusFingerprint = fingerprint
+        lastStatusWrite = now
     }
 
     private func installSignalHandlers() {
@@ -200,7 +280,7 @@ final class IndicatorDaemon: @unchecked Sendable {
         tracker.clear()
         _ = led.restoreActualCapsLockIndicator()
         ledOn = led.actualCapsLockState
-        writeStatus(now: Date())
+        writeStatusIfNeeded(mode: .off, now: Date(), force: true)
         if lockDescriptor >= 0 {
             _ = flock(lockDescriptor, LOCK_UN)
             close(lockDescriptor)

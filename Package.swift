@@ -17,6 +17,7 @@ let package = Package(
         .executableTarget(
             name: "CodexCapsLockIndicator",
             linkerSettings: [
+                .linkedFramework("AppKit"),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("IOKit"),
                 .linkedLibrary("sqlite3"),
