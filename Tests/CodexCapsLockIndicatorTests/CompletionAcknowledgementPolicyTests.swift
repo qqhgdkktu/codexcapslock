@@ -70,3 +70,24 @@ func waitingIsNotAcknowledged() {
         at: start
     ) == nil)
 }
+
+@Test("Caps Lock remains a normal key while MagSafe is the selected indicator")
+func capsLockDoesNotAcknowledgeWithMagSafe() {
+    let start = Date()
+    var policy = CompletionAcknowledgementPolicy(initialCapsLockState: false)
+
+    #expect(policy.observe(
+        mode: .done,
+        codexFrontmost: false,
+        actualCapsLockState: false,
+        capsLockAcknowledgementEnabled: false,
+        at: start
+    ) == nil)
+    #expect(policy.observe(
+        mode: .done,
+        codexFrontmost: false,
+        actualCapsLockState: true,
+        capsLockAcknowledgementEnabled: false,
+        at: start.addingTimeInterval(1)
+    ) == nil)
+}

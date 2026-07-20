@@ -12,8 +12,23 @@ let package = Package(
             name: "codex-capslock-indicator",
             targets: ["CodexCapsLockIndicator"]
         ),
+        .executable(
+            name: "codex-capslock-magsafe-helper",
+            targets: ["CodexCapsLockMagSafeHelper"]
+        ),
     ],
     targets: [
+        .target(
+            name: "MagSafeSMC",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedFramework("IOKit"),
+            ]
+        ),
+        .executableTarget(
+            name: "CodexCapsLockMagSafeHelper",
+            dependencies: ["MagSafeSMC"]
+        ),
         .executableTarget(
             name: "CodexCapsLockIndicator",
             linkerSettings: [

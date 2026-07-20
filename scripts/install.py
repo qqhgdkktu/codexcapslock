@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import plistlib
 import selectors
+import shlex
 import shutil
 import signal
 import subprocess
@@ -18,6 +21,7 @@ from typing import Any
 
 
 LABEL = "com.mikita.codex-capslock-indicator"
+MAGSAFE_LABEL = "com.mikita.codex-capslock-indicator.magsafe"
 ROOT = Path(__file__).resolve().parents[1]
 HOME = Path.home()
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", HOME / ".codex")).expanduser().resolve()
@@ -25,6 +29,9 @@ HOOKS_FILE = CODEX_HOME / "hooks.json"
 CONFIG_FILE = CODEX_HOME / "config.toml"
 INSTALL_BIN = HOME / ".local" / "bin" / "codex-capslock-indicator"
 LAUNCH_AGENT = HOME / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+MAGSAFE_HELPER = Path("/Library/PrivilegedHelperTools") / MAGSAFE_LABEL
+MAGSAFE_LAUNCH_DAEMON = Path("/Library/LaunchDaemons") / f"{MAGSAFE_LABEL}.plist"
+MAGSAFE_SOCKET = Path("/var/run") / f"{MAGSAFE_LABEL}.sock"
 STATE_DIR = HOME / "Library" / "Application Support" / "CodexCapsLockIndicator"
 HOOK_MARKER = "codex-capslock-indicator hook "
 
@@ -52,11 +59,32 @@ def run(command: list[str], *, check: bool = True, capture: bool = False) -> sub
     )
 
 
+def administrator_run(shell_command: str) -> subprocess.CompletedProcess[str]:
+    apple_script = (
+        f"do shell script {json.dumps(shell_command, ensure_ascii=False)} "
+        "with administrator privileges"
+    )
+    return subprocess.run(
+        ["/usr/bin/osascript", "-e", apple_script],
+        cwd=ROOT,
+        check=True,
+        text=True,
+    )
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def backup_user_files() -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_dir = CODEX_HOME / "backups" / "codex-capslock-indicator" / stamp
     backup_dir.mkdir(parents=True, exist_ok=True)
-    for source in (HOOKS_FILE, CONFIG_FILE, LAUNCH_AGENT):
+    for source in (HOOKS_FILE, CONFIG_FILE, LAUNCH_AGENT, MAGSAFE_LAUNCH_DAEMON):
         if source.exists():
             shutil.copy2(source, backup_dir / source.name)
     return backup_dir
@@ -161,7 +189,7 @@ class AppServerClient:
                 "clientInfo": {
                     "name": "codex_capslock_indicator_installer",
                     "title": "Codex Caps Lock Indicator Installer",
-                    "version": "1.1.0",
+                    "version": "1.2.0",
                 }
             },
         )
@@ -296,6 +324,86 @@ def stop_existing_daemon() -> None:
     raise InstallError(f"Фоновый индикатор PID {pid} не завершился после SIGTERM")
 
 
+def magsafe_port_present() -> bool:
+    for class_name in ("AppleHPMInterfaceType11", "AppleTCControllerType11"):
+        probe = subprocess.run(
+            ["/usr/sbin/ioreg", "-r", "-c", class_name, "-l"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        if '"PortType" = 17' in probe.stdout or "Port-MagSafe" in probe.stdout:
+            return True
+    return False
+
+
+def install_magsafe_helper() -> str:
+    built_helper = ROOT / ".build" / "release" / "codex-capslock-magsafe-helper"
+    if not built_helper.exists():
+        raise InstallError("Release-бинарник помощника MagSafe не найден")
+
+    document = {
+        "Label": MAGSAFE_LABEL,
+        "ProgramArguments": [str(MAGSAFE_HELPER)],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ProcessType": "Background",
+        "Nice": 10,
+        "LowPriorityIO": True,
+        "ThrottleInterval": 10,
+        "StandardOutPath": "/dev/null",
+        "StandardErrorPath": "/dev/null",
+    }
+    expected_hash = sha256(built_helper)
+    try:
+        installed_document = plistlib.loads(MAGSAFE_LAUNCH_DAEMON.read_bytes())
+        installed_is_current = (
+            sha256(MAGSAFE_HELPER) == expected_hash
+            and installed_document == document
+        )
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        installed_is_current = False
+
+    if installed_is_current:
+        probe = run([str(INSTALL_BIN), "magsafe", "probe"], check=False, capture=True)
+        if probe.returncode == 0:
+            print("   Помощник MagSafe уже актуален; системное окно не требуется.")
+            return expected_hash
+
+    print("   Для управления SMC macOS покажет защищённое окно администратора.")
+    staging_directory = Path(tempfile.mkdtemp(prefix=f"{MAGSAFE_LABEL}.", dir="/private/tmp"))
+    staged_helper = staging_directory / "helper"
+    temporary_plist = staging_directory / f"{MAGSAFE_LABEL}.plist"
+    try:
+        shutil.copy2(built_helper, staged_helper)
+        os.chmod(staged_helper, 0o755)
+        with temporary_plist.open("wb") as handle:
+            plistlib.dump(document, handle, fmt=plistlib.FMT_XML, sort_keys=True)
+
+        privileged_commands = [
+            f"({shlex.join(['/bin/launchctl', 'bootout', 'system', str(MAGSAFE_LAUNCH_DAEMON)])} >/dev/null 2>&1 || true)",
+            shlex.join(["/usr/bin/install", "-d", "-o", "root", "-g", "wheel", "-m", "755", str(MAGSAFE_HELPER.parent)]),
+            shlex.join(["/usr/bin/install", "-o", "root", "-g", "wheel", "-m", "755", str(staged_helper), str(MAGSAFE_HELPER)]),
+            shlex.join(["/usr/bin/install", "-o", "root", "-g", "wheel", "-m", "644", str(temporary_plist), str(MAGSAFE_LAUNCH_DAEMON)]),
+            shlex.join(["/bin/launchctl", "bootstrap", "system", str(MAGSAFE_LAUNCH_DAEMON)]),
+        ]
+        administrator_run(" && ".join(privileged_commands))
+    finally:
+        shutil.rmtree(staging_directory, ignore_errors=True)
+
+    installed_hash = sha256(MAGSAFE_HELPER)
+    if installed_hash != expected_hash:
+        raise InstallError("Хеш установленного помощника MagSafe не совпал с release-сборкой")
+
+    for _ in range(20):
+        time.sleep(0.25)
+        probe = run([str(INSTALL_BIN), "magsafe", "probe"], check=False, capture=True)
+        if probe.returncode == 0:
+            return installed_hash
+    raise InstallError("Привилегированный помощник MagSafe не ответил за 5 секунд")
+
+
 def start_indicator() -> int:
     process = subprocess.Popen(
         [str(INSTALL_BIN), "daemon"],
@@ -317,9 +425,9 @@ def main() -> int:
     if swift is None:
         raise InstallError("Swift toolchain не найден; установите Xcode Command Line Tools")
 
-    print("1/7 Проверяю исходный код и тесты…")
+    print("1/9 Проверяю исходный код и тесты…")
     run([swift, "test"])
-    print("2/7 Собираю оптимизированный бинарник…")
+    print("2/9 Собираю оптимизированные бинарники…")
     run([swift, "build", "-c", "release"])
 
     backup_dir = backup_user_files()
@@ -327,7 +435,7 @@ def main() -> int:
     stop_existing_daemon()
     LAUNCH_AGENT.unlink(missing_ok=True)
 
-    print("3/7 Устанавливаю бинарник…")
+    print("3/9 Устанавливаю основной бинарник…")
     INSTALL_BIN.parent.mkdir(parents=True, exist_ok=True)
     built_binary = ROOT / ".build" / "release" / "codex-capslock-indicator"
     temporary_binary = INSTALL_BIN.with_name(f".{INSTALL_BIN.name}.new")
@@ -335,16 +443,26 @@ def main() -> int:
     os.chmod(temporary_binary, 0o755)
     os.replace(temporary_binary, INSTALL_BIN)
 
-    print("4/7 Проверяю реальный LED и неизменность режима Caps Lock…")
+    print("4/9 Настраиваю управление MagSafe, если порт есть…")
+    mag_safe_port = magsafe_port_present()
+    mag_safe_helper_hash: str | None = None
+    if mag_safe_port:
+        mag_safe_helper_hash = install_magsafe_helper()
+        print("   Помощник MagSafe готов и отвечает.")
+    else:
+        print("   Порт MagSafe не найден — остаётся режим Caps Lock.")
+
+    print("5/9 Проверяю реальные LED и неизменность режима Caps Lock…")
     run([str(INSTALL_BIN), "self-test"])
 
-    print("5/7 Добавляю lifecycle hooks Codex, не меняя существующий notify…")
+    print("6/9 Добавляю lifecycle hooks Codex, не меняя существующий notify…")
     install_hooks()
     hook_count = trust_indicator_hooks(codex)
 
-    print("6/7 Запускаю фоновый индикатор из пользовательского контекста…")
+    print("7/9 Запускаю фоновый индикатор из пользовательского контекста…")
     expected_pid = start_indicator()
 
+    print("8/9 Проверяю выбранный индикатор и фоновый процесс…")
     status: subprocess.CompletedProcess[str] | None = None
     for _ in range(20):
         time.sleep(0.5)
@@ -371,10 +489,13 @@ def main() -> int:
             "hooksFile": str(HOOKS_FILE),
             "backup": str(backup_dir),
             "hookCount": hook_count,
+            "magSafePortPresent": mag_safe_port,
+            "magSafeHelper": str(MAGSAFE_HELPER) if mag_safe_helper_hash else None,
+            "magSafeHelperSHA256": mag_safe_helper_hash,
         },
     )
 
-    print("7/7 Готово.")
+    print("9/9 Готово.")
     print(status.stdout.rstrip())
     print(f"Резервная копия конфигурации: {backup_dir}")
     return 0

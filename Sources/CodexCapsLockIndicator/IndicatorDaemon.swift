@@ -15,8 +15,13 @@ enum IndicatorDaemonError: Error, CustomStringConvertible {
 
 private struct DaemonStatusFingerprint: Equatable {
     let mode: IndicatorMode
+    let output: IndicatorOutput
     let keyboardAvailable: Bool
     let keyboardName: String?
+    let magSafePortPresent: Bool
+    let magSafeConnected: Bool
+    let magSafeControlAvailable: Bool
+    let magSafeLEDMode: MagSafeLEDMode?
     let activeSessions: Int
     let codexProcessRunning: Bool
 }
@@ -31,6 +36,8 @@ final class IndicatorDaemon: @unchecked Sendable {
     private let logWatcher: CodexLogWatcher
     private let processDetector = CodexProcessDetector()
     private let applicationMonitor = CodexApplicationMonitor()
+    private let magSafeConnectionDetector = MagSafeConnectionDetector()
+    private let magSafeLED = MagSafeLEDController()
     private var tracker = ActivityTracker()
     private var acknowledgementPolicy: CompletionAcknowledgementPolicy
     private var timer: DispatchSourceTimer?
@@ -41,12 +48,22 @@ final class IndicatorDaemon: @unchecked Sendable {
     private var lastProcessCheck = Date.distantPast
     private var lastLogCheck = Date.distantPast
     private var lastTranscriptCheck = Date.distantPast
+    private var lastMagSafeConnectionCheck = Date.distantPast
+    private var lastMagSafeProbe = Date.distantPast
     private var lastStatusFingerprint: DaemonStatusFingerprint?
     private var codexRunning = false
     private var processWasSeen = false
     private var processAbsentSince: Date?
     private var ledOn = false
     private var blinkOn = true
+    private var output: IndicatorOutput = .capsLock
+    private var magSafeSnapshot = MagSafeConnectionSnapshot(
+        portPresent: false,
+        connectionActive: false,
+        externalPowerAttached: false
+    )
+    private var magSafeControlAvailable = false
+    private var appliedMagSafeMode: MagSafeLEDMode?
     private var forceActualLEDRestoreUntil: Date?
     private var stopping = false
     private var lockDescriptor: Int32 = -1
@@ -109,6 +126,7 @@ final class IndicatorDaemon: @unchecked Sendable {
             updateProcessState(now: now)
             lastProcessCheck = now
         }
+        updateMagSafeState(now: now)
 
         var actualCapsLockState = led.actualCapsLockState
         let modeBeforeAcknowledgement = tracker.effectiveMode
@@ -117,6 +135,7 @@ final class IndicatorDaemon: @unchecked Sendable {
             mode: modeBeforeAcknowledgement,
             codexFrontmost: codexFrontmost,
             actualCapsLockState: actualCapsLockState,
+            capsLockAcknowledgementEnabled: output == .capsLock,
             at: now
         ) {
             if reason != .capsLockKey
@@ -131,13 +150,14 @@ final class IndicatorDaemon: @unchecked Sendable {
                     mode: tracker.effectiveMode,
                     codexFrontmost: codexFrontmost,
                     actualCapsLockState: actualCapsLockState,
+                    capsLockAcknowledgementEnabled: output == .capsLock,
                     at: now
                 )
             }
         }
 
         let effectiveMode = tracker.effectiveMode
-        applyLED(for: effectiveMode, actualCapsLockState: actualCapsLockState, now: now)
+        applyIndicator(for: effectiveMode, actualCapsLockState: actualCapsLockState, now: now)
 
         writeStatusIfNeeded(mode: effectiveMode, now: now)
     }
@@ -169,7 +189,77 @@ final class IndicatorDaemon: @unchecked Sendable {
         try? journalWriter.appendAcknowledgement()
     }
 
-    private func applyLED(
+    private func updateMagSafeState(now: Date) {
+        if now.timeIntervalSince(lastMagSafeConnectionCheck) >= Constants.magSafeConnectionPollInterval {
+            magSafeSnapshot = magSafeConnectionDetector.snapshot()
+            lastMagSafeConnectionCheck = now
+        }
+
+        if magSafeSnapshot.portPresent {
+            let probeInterval = magSafeControlAvailable
+                ? Constants.magSafeProbeInterval
+                : Constants.magSafeRetryInterval
+            if now.timeIntervalSince(lastMagSafeProbe) >= probeInterval {
+                magSafeControlAvailable = magSafeLED.probe()
+                lastMagSafeProbe = now
+            }
+        } else {
+            magSafeControlAvailable = false
+        }
+
+        let selected = IndicatorOutputRouting.select(
+            magSafe: magSafeSnapshot,
+            magSafeControlAvailable: magSafeControlAvailable
+        )
+        if selected != output {
+            switchOutput(to: selected, now: now)
+        }
+    }
+
+    private func switchOutput(to selected: IndicatorOutput, now: Date) {
+        if output == .magSafe {
+            _ = magSafeLED.setMode(.system)
+            appliedMagSafeMode = .system
+        }
+
+        output = selected
+        blinkOn = true
+        lastBlinkTransition = now
+
+        switch selected {
+        case .magSafe:
+            _ = led.restoreActualCapsLockIndicator()
+            ledOn = false
+            appliedMagSafeMode = nil
+        case .capsLock:
+            ledOn = led.hardwareIndicatorState ?? led.actualCapsLockState
+        }
+    }
+
+    private func applyIndicator(
+        for mode: IndicatorMode,
+        actualCapsLockState: Bool,
+        now: Date
+    ) {
+        if output == .magSafe {
+            let requestedMode = IndicatorOutputRouting.magSafeMode(for: mode)
+            if requestedMode != appliedMagSafeMode {
+                guard magSafeLED.setMode(requestedMode) else {
+                    magSafeControlAvailable = false
+                    switchOutput(to: .capsLock, now: now)
+                    applyCapsLockLED(for: mode, actualCapsLockState: actualCapsLockState, now: now)
+                    return
+                }
+                appliedMagSafeMode = requestedMode
+                ledOn = requestedMode != .system && requestedMode != .off
+            }
+            return
+        }
+
+        applyCapsLockLED(for: mode, actualCapsLockState: actualCapsLockState, now: now)
+    }
+
+    private func applyCapsLockLED(
         for mode: IndicatorMode,
         actualCapsLockState: Bool,
         now: Date
@@ -210,8 +300,13 @@ final class IndicatorDaemon: @unchecked Sendable {
     private func writeStatusIfNeeded(mode: IndicatorMode, now: Date, force: Bool = false) {
         let fingerprint = DaemonStatusFingerprint(
             mode: mode,
+            output: output,
             keyboardAvailable: led.isAvailable,
             keyboardName: led.keyboardName,
+            magSafePortPresent: magSafeSnapshot.portPresent,
+            magSafeConnected: magSafeSnapshot.connected,
+            magSafeControlAvailable: magSafeControlAvailable,
+            magSafeLEDMode: appliedMagSafeMode,
             activeSessions: tracker.sessions.count,
             codexProcessRunning: codexRunning
         )
@@ -224,9 +319,14 @@ final class IndicatorDaemon: @unchecked Sendable {
         let status = DaemonStatus(
             pid: getpid(),
             mode: mode,
+            output: output,
             ledOn: ledOn,
             keyboardAvailable: led.isAvailable,
             keyboardName: led.keyboardName,
+            magSafePortPresent: magSafeSnapshot.portPresent,
+            magSafeConnected: magSafeSnapshot.connected,
+            magSafeControlAvailable: magSafeControlAvailable,
+            magSafeLEDMode: appliedMagSafeMode,
             activeSessions: tracker.sessions.count,
             codexProcessRunning: codexRunning,
             updatedAt: now,
@@ -278,6 +378,7 @@ final class IndicatorDaemon: @unchecked Sendable {
         stopping = true
         timer?.cancel()
         tracker.clear()
+        _ = magSafeLED.setMode(.system)
         _ = led.restoreActualCapsLockIndicator()
         ledOn = led.actualCapsLockState
         writeStatusIfNeeded(mode: .off, now: Date(), force: true)

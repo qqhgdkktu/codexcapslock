@@ -19,6 +19,7 @@ struct CompletionAcknowledgementPolicy: Sendable {
         mode: IndicatorMode,
         codexFrontmost: Bool,
         actualCapsLockState: Bool,
+        capsLockAcknowledgementEnabled: Bool = true,
         at date: Date = Date()
     ) -> CompletionAcknowledgementReason? {
         defer { lastCapsLockState = actualCapsLockState }
@@ -33,7 +34,7 @@ struct CompletionAcknowledgementPolicy: Sendable {
             return nil
         }
 
-        if actualCapsLockState != lastCapsLockState {
+        if capsLockAcknowledgementEnabled && actualCapsLockState != lastCapsLockState {
             return .capsLockKey
         }
 

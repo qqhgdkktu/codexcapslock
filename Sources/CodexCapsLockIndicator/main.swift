@@ -5,6 +5,8 @@ private enum CommandError: Error, CustomStringConvertible {
     case invalidArguments(String)
     case keyboardUnavailable
     case ledWriteFailed
+    case magSafeUnavailable
+    case magSafeWriteFailed
     case statusUnavailable
     case selfTestFailed(String)
 
@@ -13,6 +15,8 @@ private enum CommandError: Error, CustomStringConvertible {
         case let .invalidArguments(message): message
         case .keyboardUnavailable: "Встроенная клавиатура с LED Caps Lock не найдена."
         case .ledWriteFailed: "macOS не приняла команду управления LED Caps Lock."
+        case .magSafeUnavailable: "Привилегированный помощник MagSafe недоступен или ACLC не поддерживается."
+        case .magSafeWriteFailed: "macOS не приняла команду управления LED MagSafe."
         case .statusUnavailable: "Индикатор ещё не запущен или не успел записать состояние."
         case let .selfTestFailed(message): "Самопроверка не пройдена: \(message)"
         }
@@ -67,6 +71,17 @@ enum CodexCapsLockIndicatorMain {
         case "inspect-led":
             inspectLED()
 
+        case "inspect-magsafe":
+            inspectMagSafe()
+
+        case "magsafe":
+            guard arguments.count == 2 else {
+                throw CommandError.invalidArguments(
+                    "Использование: magsafe probe|status|system|green|blink-slow"
+                )
+            }
+            try controlMagSafe(arguments[1])
+
         case "raw-led":
             guard arguments.count == 2, ["on", "off"].contains(arguments[1]) else {
                 throw CommandError.invalidArguments("Использование: raw-led on|off")
@@ -103,13 +118,21 @@ enum CodexCapsLockIndicatorMain {
             .done: "Codex завершил работу — LED горит",
         ]
         print("Состояние: \(labels[status.mode] ?? status.mode.rawValue)")
+        print("Индикатор: \(status.output == .magSafe ? "MagSafe" : "Caps Lock")")
         print("Клавиатура: \(status.keyboardName ?? "не найдена")")
-        print("LED: \(status.ledOn ? "включён" : "выключен")")
+        print("Индикация Codex: \(status.ledOn ? "активна" : "неактивна")")
+        let magSafeConnection = status.magSafeConnected ? "подключён" : "не подключён"
+        let magSafeControl = status.magSafeControlAvailable ? "доступно" : "недоступно"
+        print("MagSafe: \(magSafeConnection), управление \(magSafeControl)")
         print("Codex: \(status.codexProcessRunning ? "запущен" : "не запущен")")
         print("Активных сессий: \(status.activeSessions)")
         print("PID: \(status.pid)")
         if status.mode == .done {
-            print("Сброс: нажмите Caps Lock, откройте Codex или выполните команду ack.")
+            if status.output == .magSafe {
+                print("Сброс: откройте Codex или выполните команду ack; Caps Lock работает обычно.")
+            } else {
+                print("Сброс: нажмите Caps Lock, откройте Codex или выполните команду ack.")
+            }
         }
     }
 
@@ -167,6 +190,41 @@ enum CodexCapsLockIndicatorMain {
         print("Режим Caps Lock: \(controller.actualCapsLockState)")
     }
 
+    private static func inspectMagSafe() {
+        let snapshot = MagSafeConnectionDetector().snapshot()
+        let controller = MagSafeLEDController()
+        print("Порт MagSafe: \(snapshot.portPresent ? "найден" : "не найден")")
+        print("Физическое подключение: \(snapshot.connected ? "да" : "нет")")
+        print("Внешнее питание: \(snapshot.externalPowerAttached ? "да" : "нет")")
+        print("Управление LED: \(controller.probe() ? "доступно" : "недоступно")")
+    }
+
+    private static func controlMagSafe(_ command: String) throws {
+        let controller = MagSafeLEDController()
+        switch command {
+        case "probe":
+            guard controller.probe() else {
+                throw CommandError.magSafeUnavailable
+            }
+            print("OK: управление LED MagSafe поддерживается.")
+        case "status":
+            guard let value = controller.currentValue() else {
+                throw CommandError.magSafeUnavailable
+            }
+            print(value)
+        default:
+            guard let mode = MagSafeLEDMode(rawValue: command) else {
+                throw CommandError.invalidArguments(
+                    "Использование: magsafe probe|status|system|green|blink-slow"
+                )
+            }
+            guard controller.setMode(mode) else {
+                throw CommandError.magSafeWriteFailed
+            }
+            print("OK: MagSafe LED — \(mode.rawValue).")
+        }
+    }
+
     private static func inspectRawLED(setTo enabled: Bool) {
         let controller = RawHIDCapsLockController()
         let targets = controller.targets
@@ -185,12 +243,33 @@ enum CodexCapsLockIndicatorMain {
 
     private static func runDemo() throws {
         let controller = HIDCapsLockController()
+        let magSafeSnapshot = MagSafeConnectionDetector().snapshot()
+        let magSafe = MagSafeLEDController()
+
+        if magSafeSnapshot.connected && magSafe.probe() {
+            defer {
+                _ = magSafe.setMode(.system)
+                _ = controller.restoreActualCapsLockIndicator()
+            }
+            _ = controller.restoreActualCapsLockIndicator()
+            print("Демонстрация MagSafe: 4 секунды мигания, затем 2 секунды зелёного света.")
+            guard magSafe.setMode(.blinkSlow) else {
+                throw CommandError.magSafeWriteFailed
+            }
+            Thread.sleep(forTimeInterval: 4)
+            guard magSafe.setMode(.green) else {
+                throw CommandError.magSafeWriteFailed
+            }
+            Thread.sleep(forTimeInterval: 2)
+            print("Демонстрация завершена; системная индикация зарядки восстановлена.")
+            return
+        }
+
         guard controller.isAvailable else {
             throw CommandError.keyboardUnavailable
         }
-
         defer { _ = controller.restoreActualCapsLockIndicator() }
-        print("Демонстрация: 4 секунды мигания, затем 2 секунды постоянного света.")
+        print("Демонстрация Caps Lock: 4 секунды мигания, затем 2 секунды постоянного света.")
         for index in 0..<8 {
             guard controller.setIndicator(index.isMultiple(of: 2)) else {
                 throw CommandError.ledWriteFailed
@@ -231,6 +310,33 @@ enum CodexCapsLockIndicatorMain {
 
         print("OK: \(controller.keyboardName ?? "клавиатура найдена")")
         print("OK: LED управляется отдельно от режима ввода Caps Lock")
+
+        let magSafeSnapshot = MagSafeConnectionDetector().snapshot()
+        if magSafeSnapshot.connected {
+            let magSafe = MagSafeLEDController()
+            guard magSafe.probe() else {
+                throw CommandError.magSafeUnavailable
+            }
+            defer { _ = magSafe.setMode(.system) }
+            guard magSafe.setMode(.green) else {
+                throw CommandError.selfTestFailed("не удалось включить зелёный режим MagSafe")
+            }
+            var greenVerified = false
+            for _ in 0..<20 {
+                Thread.sleep(forTimeInterval: 0.1)
+                if magSafe.currentValue() == 3 {
+                    greenVerified = true
+                    break
+                }
+            }
+            guard greenVerified else {
+                throw CommandError.selfTestFailed("LED MagSafe не перешёл в зелёный режим")
+            }
+            guard magSafe.setMode(.system) else {
+                throw CommandError.selfTestFailed("не удалось восстановить системный режим MagSafe")
+            }
+            print("OK: подключённый MagSafe управляется и возвращается в системный режим")
+        }
     }
 
     private static func printHelp() {
@@ -244,9 +350,11 @@ enum CodexCapsLockIndicatorMain {
           ack                 погасить уведомление о завершённых задачах
           led on|off|restore  напрямую проверить LED
           inspect-led         показать LED и реальный режим Caps Lock
+          inspect-magsafe     показать подключение и доступность MagSafe
+          magsafe COMMAND     низкоуровневая диагностика MagSafe
           raw-led on|off      экспериментальный прямой HID output-report
-          demo                показать мигание и постоянный свет
-          self-test           проверить LED и неизменность режима Caps Lock
+          demo                показать выбранный автоматически индикатор
+          self-test           проверить Caps Lock и подключённый MagSafe
         """)
     }
 }

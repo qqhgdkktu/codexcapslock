@@ -3,6 +3,7 @@ import Foundation
 private struct TranscriptFileState {
     var offset: UInt64
     var remainder: Data
+    var discardingPartialLine: Bool
     var sessionID: String?
     var modifiedAt: Date
 }
@@ -13,6 +14,9 @@ final class TranscriptMonitor {
     private var lastDiscoveryAt = Date.distantPast
     private let discoveryInterval: TimeInterval = 2.0
     private let initialLookback: TimeInterval = 60 * 60
+    private let initialTailBytes: UInt64 = 256 * 1024
+    private let readChunkBytes = 64 * 1024
+    private let maximumLifecycleLineBytes = 128 * 1024
 
     init(sessionsDirectory: URL) {
         self.sessionsDirectory = sessionsDirectory
@@ -35,14 +39,22 @@ final class TranscriptMonitor {
         for directory in recentDayDirectories(now: now) {
             guard let urls = try? FileManager.default.contentsOfDirectory(
                 at: directory,
-                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                includingPropertiesForKeys: [
+                    .contentModificationDateKey,
+                    .fileSizeKey,
+                    .isRegularFileKey,
+                ],
                 options: [.skipsHiddenFiles]
             ) else {
                 continue
             }
 
             for url in urls where url.pathExtension == "jsonl" {
-                guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                guard let values = try? url.resourceValues(forKeys: [
+                    .contentModificationDateKey,
+                    .fileSizeKey,
+                    .isRegularFileKey,
+                ]),
                       values.isRegularFile == true,
                       let modifiedAt = values.contentModificationDate else {
                     continue
@@ -57,9 +69,12 @@ final class TranscriptMonitor {
                 guard now.timeIntervalSince(modifiedAt) <= initialLookback else {
                     continue
                 }
+                let size = UInt64(max(0, values.fileSize ?? 0))
+                let offset = size > initialTailBytes ? size - initialTailBytes : 0
                 files[url] = TranscriptFileState(
-                    offset: 0,
+                    offset: offset,
                     remainder: Data(),
+                    discardingPartialLine: offset > 0,
                     sessionID: sessionIDFromFilename(url),
                     modifiedAt: modifiedAt
                 )
@@ -97,7 +112,8 @@ final class TranscriptMonitor {
         let size = number.uint64Value
         if size < state.offset {
             state.offset = 0
-            state.remainder.removeAll(keepingCapacity: true)
+            state.remainder.removeAll(keepingCapacity: false)
+            state.discardingPartialLine = false
         }
         guard size > state.offset,
               let handle = try? FileHandle(forReadingFrom: url) else {
@@ -108,22 +124,46 @@ final class TranscriptMonitor {
 
         do {
             try handle.seek(toOffset: state.offset)
-            let data = try handle.readToEnd() ?? Data()
-            state.offset += UInt64(data.count)
-            state.remainder.append(data)
+            var events: [TranscriptEvent] = []
+            while state.offset < size {
+                let remaining = size - state.offset
+                let count = min(readChunkBytes, Int(remaining))
+                guard let data = try handle.read(upToCount: count), !data.isEmpty else {
+                    break
+                }
+                state.offset += UInt64(data.count)
+                state.remainder.append(data)
+                events.append(contentsOf: consumeCompleteLines(state: &state))
+            }
+            files[url] = state
+            return events
         } catch {
             files[url] = state
             return []
         }
+    }
 
+    private func consumeCompleteLines(state: inout TranscriptFileState) -> [TranscriptEvent] {
         var events: [TranscriptEvent] = []
         while let newline = state.remainder.firstIndex(of: 0x0A) {
-            let line = Data(state.remainder[..<newline])
+            if state.discardingPartialLine {
+                state.remainder.removeSubrange(...newline)
+                state.discardingPartialLine = false
+                continue
+            }
+
+            let lineLength = state.remainder.distance(from: state.remainder.startIndex, to: newline)
+            if lineLength <= maximumLifecycleLineBytes {
+                let line = Data(state.remainder[..<newline])
+                events.append(contentsOf: parseLine(line, state: &state))
+            }
             state.remainder.removeSubrange(...newline)
-            events.append(contentsOf: parseLine(line, state: &state))
         }
 
-        files[url] = state
+        if state.remainder.count > maximumLifecycleLineBytes {
+            state.remainder.removeAll(keepingCapacity: false)
+            state.discardingPartialLine = true
+        }
         return events
     }
 

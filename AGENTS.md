@@ -4,9 +4,9 @@ This file is the operational contract for AI agents working with this repository
 
 ## Purpose and supported environment
 
-This is a native macOS SwiftPM executable that maps Codex lifecycle state to the built-in MacBook Caps Lock LED. It is supported on macOS 14 or newer and requires a built-in keyboard with a physical Caps Lock LED.
+This is a native macOS SwiftPM project that maps Codex lifecycle state to one hardware indicator at a time: a connected MagSafe 3 LED has priority, otherwise the built-in MacBook Caps Lock LED is used. It is supported on macOS 14 or newer and requires a built-in keyboard with a physical Caps Lock LED for fallback.
 
-The indicator controls the raw HID LED output separately from logical Caps Lock. Preserve that invariant in every change.
+The Caps Lock indicator controls raw HID LED output separately from logical Caps Lock. Preserve that invariant. When MagSafe is selected, Caps Lock must be entirely normal and must not be used as acknowledgement input.
 
 ## When asked to install or use it
 
@@ -23,11 +23,12 @@ The indicator controls the raw HID LED output separately from logical Caps Lock.
    ~/.local/bin/codex-capslock-indicator --version
    ~/.local/bin/codex-capslock-indicator status
    ~/.local/bin/codex-capslock-indicator self-test
+   ~/.local/bin/codex-capslock-indicator inspect-magsafe
    ```
 
-4. Report the installed version, daemon PID, keyboard name, self-test result, and backup path printed by the installer.
+4. Report the installed version, selected output, MagSafe connection/control state, daemon PID, keyboard name, self-test result, helper hash when installed, and backup path printed by the installer.
 
-The installer modifies user Codex configuration and briefly exercises hardware. Run it only when installation or live hardware verification is in scope. It preserves foreign hooks and the existing `notify` setting.
+The installer modifies user Codex configuration and briefly exercises hardware. On a Mac with MagSafe 3, it also installs a root-owned C helper and LaunchDaemon after a protected macOS administrator dialog. Run it only when installation or live hardware verification is in scope. It preserves foreign hooks and the existing `notify` setting.
 
 ## User controls agents should know
 
@@ -35,6 +36,7 @@ The installer modifies user Codex configuration and briefly exercises hardware. 
 # Read-only state
 ~/.local/bin/codex-capslock-indicator status
 ~/.local/bin/codex-capslock-indicator inspect-led
+~/.local/bin/codex-capslock-indicator inspect-magsafe
 
 # Acknowledge completed work only
 ~/.local/bin/codex-capslock-indicator ack
@@ -44,22 +46,24 @@ The installer modifies user Codex configuration and briefly exercises hardware. 
 ~/.local/bin/codex-capslock-indicator demo
 ```
 
-Do not use `hook`, `led`, or `raw-led` as normal user commands. They are lifecycle internals or low-level diagnostics.
+Do not use `hook`, `led`, `raw-led`, or `magsafe` as normal user commands. They are lifecycle internals or low-level diagnostics.
 
 ## State contract
 
 Priority is `working` over `waiting` over `done` over `off`.
 
-| State | LED contract |
+| State | Selected LED contract |
 | --- | --- |
-| `working` | 0.5 seconds on, 0.5 seconds off |
+| `working` | MagSafe firmware slow blink, or Caps Lock 0.5 seconds on / 0.5 seconds off |
 | `waiting` | Steady on until the user actually responds or approves |
 | `done` | Steady on until acknowledged |
-| `off` | Restore LED to the real logical Caps Lock state |
+| `off` | Restore MagSafe to system mode and Caps Lock to the real logical state |
+
+Output priority is strict: connected and controllable MagSafe, otherwise Caps Lock. MagSafe presence requires a physical type-17 port with `ConnectionActive` and current external power; generic USB-C charging must not count.
 
 Acknowledgement removes only completed sessions. It must never hide `working` or `waiting` sessions.
 
-For `done`, acknowledgement can come from Codex remaining frontmost, the `ack` command, or a physical Caps Lock transition. If that transition enabled logical Caps Lock, the daemon must immediately return logical Caps Lock to off and reconcile the physical LED.
+For `done` on the Caps Lock output, acknowledgement can come from Codex remaining frontmost, the `ack` command, or a physical Caps Lock transition. If that transition enabled logical Caps Lock, the daemon must immediately return logical Caps Lock to off and reconcile the physical LED. On MagSafe output, only Codex focus or `ack` may acknowledge; the Caps Lock key remains normal.
 
 ## Safety invariants
 
@@ -70,10 +74,15 @@ For `done`, acknowledgement can come from Codex remaining frontmost, the `ack` c
 - Never replace or delete foreign Codex hooks or the user's `notify` configuration.
 - Never add windows, animations, network calls, analytics, or GPU work for this indicator.
 - On shutdown, installation failure, demo completion, or self-test completion, restore the LED to the actual logical Caps Lock state.
+- Always restore MagSafe to `system` on output change, shutdown, helper termination, demo completion, self-test completion, and uninstall.
+- Keep the privileged helper command set fixed, authenticate the peer as root or the active console user, and never add arbitrary file, shell, or network operations.
 
 ## Repository map
 
 - `Sources/CodexCapsLockIndicator/IndicatorDaemon.swift`: scheduler, lifecycle aggregation, acknowledgement, LED application, shutdown.
+- `Sources/CodexCapsLockIndicator/MagSafeConnectionDetector.swift`: physical type-17 MagSafe detection with external-power corroboration.
+- `Sources/CodexCapsLockIndicator/MagSafeLEDController.swift`: bounded local UNIX-socket client.
+- `Sources/CodexCapsLockMagSafeHelper/main.c` and `Sources/MagSafeSMC`: root helper and SMC `ACLC` access.
 - `Sources/CodexCapsLockIndicator/ActivityTracker.swift`: multi-session state and priority.
 - `Sources/CodexCapsLockIndicator/CompletionAcknowledgementPolicy.swift`: pure acknowledgement timing and Caps Lock transition policy.
 - `Sources/CodexCapsLockIndicator/RawHIDCapsLockController.swift`: raw HID output access.
@@ -110,6 +119,8 @@ Also verify:
 - raw LED changes do not change logical Caps Lock;
 - SIGTERM or app exit restores the normal LED;
 - a real Codex lifecycle produces `working` and `done` hook records;
-- CPU and physical footprint have not materially regressed.
+- CPU and physical footprint have not materially regressed;
+- connected MagSafe selects only MagSafe; unplugging restores system MagSafe and selects only Caps Lock;
+- the root helper blocks in `accept`, has no polling loop, and rejects a non-console peer.
 
 Do not claim the task complete while required tests, GitHub Actions, or an explicitly requested push are pending.

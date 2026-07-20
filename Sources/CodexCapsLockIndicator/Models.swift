@@ -30,9 +30,14 @@ struct HookInput: Decodable {
 struct DaemonStatus: Codable, Sendable {
     let pid: Int32
     let mode: IndicatorMode
+    let output: IndicatorOutput
     let ledOn: Bool
     let keyboardAvailable: Bool
     let keyboardName: String?
+    let magSafePortPresent: Bool
+    let magSafeConnected: Bool
+    let magSafeControlAvailable: Bool
+    let magSafeLEDMode: MagSafeLEDMode?
     let activeSessions: Int
     let codexProcessRunning: Bool
     let updatedAt: Date
@@ -48,9 +53,12 @@ enum TranscriptEvent: Equatable, Sendable {
 }
 
 enum Constants {
-    static let version = "1.1.0"
+    static let version = "1.2.0"
     static let blinkHalfPeriod: TimeInterval = 0.5
     static let tickInterval: TimeInterval = 0.25
+    static let magSafeConnectionPollInterval: TimeInterval = 1.0
+    static let magSafeProbeInterval: TimeInterval = 30.0
+    static let magSafeRetryInterval: TimeInterval = 5.0
     static let transcriptPollInterval: TimeInterval = 0.5
     static let logPollInterval: TimeInterval = 1.0
     static let processPollInterval: TimeInterval = 5.0

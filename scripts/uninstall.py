@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import subprocess
 import tempfile
@@ -14,11 +15,15 @@ from typing import Any
 
 
 LABEL = "com.mikita.codex-capslock-indicator"
+MAGSAFE_LABEL = "com.mikita.codex-capslock-indicator.magsafe"
 HOME = Path.home()
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", HOME / ".codex")).expanduser().resolve()
 HOOKS_FILE = CODEX_HOME / "hooks.json"
 INSTALL_BIN = HOME / ".local" / "bin" / "codex-capslock-indicator"
 LAUNCH_AGENT = HOME / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+MAGSAFE_HELPER = Path("/Library/PrivilegedHelperTools") / MAGSAFE_LABEL
+MAGSAFE_LAUNCH_DAEMON = Path("/Library/LaunchDaemons") / f"{MAGSAFE_LABEL}.plist"
+MAGSAFE_SOCKET = Path("/var/run") / f"{MAGSAFE_LABEL}.sock"
 STATE_DIR = HOME / "Library" / "Application Support" / "CodexCapsLockIndicator"
 HOOK_MARKER = "codex-capslock-indicator hook "
 
@@ -107,6 +112,37 @@ def stop_daemon() -> None:
             return
 
 
+def remove_magsafe_helper() -> bool:
+    if not MAGSAFE_HELPER.exists() and not MAGSAFE_LAUNCH_DAEMON.exists():
+        return False
+
+    print("Для удаления системного помощника MagSafe macOS покажет защищённое окно администратора.")
+    bootout = shlex.join([
+        "/bin/launchctl",
+        "bootout",
+        "system",
+        str(MAGSAFE_LAUNCH_DAEMON),
+    ])
+    remove = shlex.join([
+        "/bin/rm",
+        "-f",
+        str(MAGSAFE_HELPER),
+        str(MAGSAFE_LAUNCH_DAEMON),
+        str(MAGSAFE_SOCKET),
+    ])
+    command = f"({bootout} >/dev/null 2>&1 || true) && {remove}"
+    apple_script = (
+        f"do shell script {json.dumps(command, ensure_ascii=False)} "
+        "with administrator privileges"
+    )
+    subprocess.run(
+        ["/usr/bin/osascript", "-e", apple_script],
+        check=True,
+        text=True,
+    )
+    return True
+
+
 def main() -> int:
     domain = f"gui/{os.getuid()}"
     subprocess.run(
@@ -116,14 +152,18 @@ def main() -> int:
         stderr=subprocess.DEVNULL,
     )
     stop_daemon()
-    removed_hooks = remove_hooks()
 
     if INSTALL_BIN.exists():
+        subprocess.run([str(INSTALL_BIN), "magsafe", "system"], check=False)
         subprocess.run([str(INSTALL_BIN), "led", "restore"], check=False)
+    removed_magsafe = remove_magsafe_helper()
+    removed_hooks = remove_hooks()
+    if INSTALL_BIN.exists():
         INSTALL_BIN.unlink()
     LAUNCH_AGENT.unlink(missing_ok=True)
 
     print(f"Удалено hooks: {removed_hooks}")
+    print(f"Помощник MagSafe: {'удалён' if removed_magsafe else 'не был установлен'}")
     print("Индикатор удалён; диагностические данные и резервные копии сохранены.")
     return 0
 
