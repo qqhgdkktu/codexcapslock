@@ -43,6 +43,7 @@ The `waiting` state is deliberately not dismissible because it represents outsta
 
 - A physical Caps Lock acknowledgement ends with both the notification LED and real Caps Lock off.
 - Connected MagSafe selects only MagSafe; unplugging selects only Caps Lock within the one-second detection interval.
+- Waking the Mac or detecting an external `ACLC` reset reapplies the current MagSafe lifecycle mode without disturbing Caps Lock.
 - While MagSafe is selected, a Caps Lock press changes normal logical Caps Lock and does not acknowledge either agent.
 - Foreground acknowledgement clears only the first Codex completion and never clears waiting work or a Claude Code completion.
 - New work after an acknowledgement starts blinking normally.

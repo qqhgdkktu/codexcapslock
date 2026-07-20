@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
-INSTALL_SCRIPT = Path(__file__).resolve().parents[1] / "install.py"
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+INSTALL_SCRIPT = SCRIPTS_DIR / "install.py"
 SPEC = importlib.util.spec_from_file_location("indicator_install", INSTALL_SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 indicator_install = importlib.util.module_from_spec(SPEC)
@@ -15,6 +20,38 @@ SPEC.loader.exec_module(indicator_install)
 
 
 class HookConfigurationTests(unittest.TestCase):
+    def test_privileged_magsafe_install_verifies_root_owned_staging_before_launch(self) -> None:
+        command = indicator_install.build_privileged_magsafe_install_command(
+            Path("/private/tmp/staged-helper"),
+            Path("/private/tmp/staged-daemon.plist"),
+            "a" * 64,
+            "b" * 64,
+        )
+
+        helper_staging = str(
+            indicator_install.MAGSAFE_HELPER.with_name(
+                f".{indicator_install.MAGSAFE_HELPER.name}.new"
+            )
+        )
+        plist_staging = str(
+            indicator_install.MAGSAFE_LAUNCH_DAEMON.with_name(
+                f".{indicator_install.MAGSAFE_LAUNCH_DAEMON.name}.new"
+            )
+        )
+        first_hash_check = command.index("/usr/bin/shasum -a 256")
+        bootout = command.index("/bin/launchctl bootout")
+        bootstrap = command.index("/bin/launchctl bootstrap")
+
+        self.assertIn(helper_staging, command)
+        self.assertIn(plist_staging, command)
+        self.assertIn("a" * 64, command)
+        self.assertIn("b" * 64, command)
+        self.assertIn("/bin/test", command)
+        self.assertNotIn("/usr/bin/test", command)
+        self.assertLess(first_hash_check, bootout)
+        self.assertLess(bootout, bootstrap)
+        self.assertIn("trap ", command)
+
     def test_claude_hooks_preserve_foreign_settings_and_are_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings_file = Path(directory) / "settings.json"

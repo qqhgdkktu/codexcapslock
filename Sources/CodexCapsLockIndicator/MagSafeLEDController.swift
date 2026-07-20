@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-enum MagSafeLEDMode: String, Codable, Sendable {
+enum MagSafeLEDMode: String, Codable, CaseIterable, Sendable {
     case system
     case off
     case green
@@ -10,6 +10,26 @@ enum MagSafeLEDMode: String, Codable, Sendable {
     case blinkSlow = "blink-slow"
     case blinkFast = "blink-fast"
     case blinkOff = "blink-off"
+
+    var aclcValue: UInt8 {
+        switch self {
+        case .system: 0
+        case .off: 1
+        case .green: 3
+        case .orange: 4
+        case .flash: 5
+        case .blinkSlow: 6
+        case .blinkFast: 7
+        case .blinkOff: 19
+        }
+    }
+
+    init?(aclcValue: UInt8) {
+        guard let mode = Self.allCases.first(where: { $0.aclcValue == aclcValue }) else {
+            return nil
+        }
+        self = mode
+    }
 }
 
 struct MagSafeHelperResponse: Equatable, Sendable {
@@ -23,6 +43,7 @@ struct MagSafeHelperResponse: Equatable, Sendable {
 
 final class MagSafeLEDController {
     static let socketPath = "/var/run/com.mikita.codex-capslock-indicator.magsafe.sock"
+    private static let maximumResponseBytes = 4_096
 
     private let socketPath: String
 
@@ -30,13 +51,26 @@ final class MagSafeLEDController {
         self.socketPath = socketPath
     }
 
+    func ping() -> Bool {
+        guard let response = send("ping"), response.succeeded else {
+            return false
+        }
+        return response.body == "pong"
+    }
+
     func probe() -> Bool {
-        send("probe")?.succeeded == true
+        guard let response = send("probe"), response.succeeded else {
+            return false
+        }
+        return response.body == "supported"
     }
 
     @discardableResult
     func setMode(_ mode: MagSafeLEDMode) -> Bool {
-        send(mode.rawValue)?.succeeded == true
+        guard let response = send(mode.rawValue), response.succeeded else {
+            return false
+        }
+        return response.body == "ok"
     }
 
     func currentValue() -> UInt8? {
@@ -47,7 +81,11 @@ final class MagSafeLEDController {
     }
 
     func send(_ command: String) -> MagSafeHelperResponse? {
-        guard !command.isEmpty, command.utf8.count <= 64 else {
+        guard !command.isEmpty,
+              command.utf8.count <= 64,
+              !command.utf8.contains(0),
+              !command.contains("\r"),
+              !command.contains("\n") else {
             return nil
         }
 
@@ -57,8 +95,19 @@ final class MagSafeLEDController {
         }
         defer { close(descriptor) }
 
+        var noSignal: Int32 = 1
+        guard setsockopt(
+            descriptor,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &noSignal,
+            socklen_t(MemoryLayout<Int32>.size)
+        ) == 0 else {
+            return nil
+        }
+
         var timeout = timeval(tv_sec: 0, tv_usec: 250_000)
-        _ = withUnsafePointer(to: &timeout) { pointer in
+        let sendTimeoutConfigured = withUnsafePointer(to: &timeout) { pointer in
             setsockopt(
                 descriptor,
                 SOL_SOCKET,
@@ -67,7 +116,7 @@ final class MagSafeLEDController {
                 socklen_t(MemoryLayout<timeval>.size)
             )
         }
-        _ = withUnsafePointer(to: &timeout) { pointer in
+        let receiveTimeoutConfigured = withUnsafePointer(to: &timeout) { pointer in
             setsockopt(
                 descriptor,
                 SOL_SOCKET,
@@ -75,6 +124,9 @@ final class MagSafeLEDController {
                 pointer,
                 socklen_t(MemoryLayout<timeval>.size)
             )
+        }
+        guard sendTimeoutConfigured == 0, receiveTimeoutConfigured == 0 else {
+            return nil
         }
 
         var address = sockaddr_un()
@@ -106,18 +158,12 @@ final class MagSafeLEDController {
         }
 
         let payload = Data((command + "\n").utf8)
-        let sent = payload.withUnsafeBytes { buffer in
-            Darwin.write(descriptor, buffer.baseAddress, buffer.count)
-        }
-        guard sent == payload.count else {
+        guard writeAll(payload, to: descriptor) else {
             return nil
         }
+        _ = shutdown(descriptor, SHUT_WR)
 
-        var buffer = [UInt8](repeating: 0, count: 320)
-        let count = Darwin.read(descriptor, &buffer, buffer.count)
-        guard count > 0,
-              let line = String(data: Data(buffer.prefix(Int(count))), encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) else {
+        guard let line = readResponseLine(from: descriptor) else {
             return nil
         }
 
@@ -126,5 +172,70 @@ final class MagSafeLEDController {
             return nil
         }
         return MagSafeHelperResponse(status: status, body: String(pieces[1]))
+    }
+
+    private func writeAll(_ data: Data, to descriptor: Int32) -> Bool {
+        data.withUnsafeBytes { buffer in
+            guard let baseAddress = buffer.baseAddress else {
+                return false
+            }
+
+            var offset = 0
+            while offset < buffer.count {
+                let count = Darwin.write(
+                    descriptor,
+                    baseAddress.advanced(by: offset),
+                    buffer.count - offset
+                )
+                if count > 0 {
+                    offset += count
+                } else if count < 0, errno == EINTR {
+                    continue
+                } else {
+                    return false
+                }
+            }
+            return true
+        }
+    }
+
+    private func readResponseLine(from descriptor: Int32) -> String? {
+        var response = Data()
+        var buffer = [UInt8](repeating: 0, count: 320)
+
+        while true {
+            let count = Darwin.read(descriptor, &buffer, buffer.count)
+            if count > 0 {
+                response.append(contentsOf: buffer.prefix(Int(count)))
+                guard response.count <= Self.maximumResponseBytes else {
+                    return nil
+                }
+            } else if count == 0 {
+                break
+            } else if errno == EINTR {
+                continue
+            } else {
+                return nil
+            }
+        }
+
+        guard let newline = response.firstIndex(of: 0x0A) else {
+            return nil
+        }
+        let trailing = response[response.index(after: newline)...]
+        guard trailing.allSatisfy({ $0 == 0x0A || $0 == 0x0D }) else {
+            return nil
+        }
+
+        var line = response[..<newline]
+        if line.last == 0x0D {
+            line = line.dropLast()
+        }
+        guard !line.isEmpty,
+              !line.contains(0),
+              let value = String(data: line, encoding: .utf8) else {
+            return nil
+        }
+        return value
     }
 }

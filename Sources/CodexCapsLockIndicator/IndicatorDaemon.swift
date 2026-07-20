@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 
@@ -22,6 +23,10 @@ private struct DaemonStatusFingerprint: Equatable {
     let magSafeConnected: Bool
     let magSafeControlAvailable: Bool
     let magSafeLEDMode: MagSafeLEDMode?
+    let magSafeRawValue: UInt8?
+    let magSafeExpectedValue: UInt8?
+    let magSafeSynchronized: Bool?
+    let magSafeLastWriteAt: Date?
     let activeSessions: Int
     let codexProcessRunning: Bool
     let claudeProcessRunning: Bool
@@ -43,6 +48,7 @@ final class IndicatorDaemon: @unchecked Sendable {
     private var acknowledgementPolicy: CompletionAcknowledgementPolicy
     private var timer: DispatchSourceTimer?
     private var signalSources: [DispatchSourceSignal] = []
+    private var workspaceObservers: [NSObjectProtocol] = []
     private var startedAt = Date()
     private var lastBlinkTransition = Date()
     private var lastStatusWrite = Date.distantPast
@@ -66,6 +72,9 @@ final class IndicatorDaemon: @unchecked Sendable {
     )
     private var magSafeControlAvailable = false
     private var appliedMagSafeMode: MagSafeLEDMode?
+    private var magSafeRawValue: UInt8?
+    private var magSafeReconciliationRequested = true
+    private var magSafeLastWriteAt: Date?
     private var forceActualLEDRestoreUntil: Date?
     private var stopping = false
     private var lockDescriptor: Int32 = -1
@@ -88,6 +97,7 @@ final class IndicatorDaemon: @unchecked Sendable {
         try acquireSingletonLock()
         startedAt = Date()
         installSignalHandlers()
+        installWorkspaceObservers()
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: Constants.tickInterval, leeway: .milliseconds(20))
@@ -171,6 +181,7 @@ final class IndicatorDaemon: @unchecked Sendable {
 
         let effectiveMode = tracker.effectiveMode
         applyIndicator(for: effectiveMode, actualCapsLockState: actualCapsLockState, now: now)
+        magSafeReconciliationRequested = false
 
         writeStatusIfNeeded(mode: effectiveMode, now: now)
     }
@@ -221,7 +232,8 @@ final class IndicatorDaemon: @unchecked Sendable {
     }
 
     private func updateMagSafeState(now: Date) {
-        if now.timeIntervalSince(lastMagSafeConnectionCheck) >= Constants.magSafeConnectionPollInterval {
+        if magSafeReconciliationRequested
+            || now.timeIntervalSince(lastMagSafeConnectionCheck) >= Constants.magSafeConnectionPollInterval {
             magSafeSnapshot = magSafeConnectionDetector.snapshot()
             lastMagSafeConnectionCheck = now
         }
@@ -230,12 +242,14 @@ final class IndicatorDaemon: @unchecked Sendable {
             let probeInterval = magSafeControlAvailable
                 ? Constants.magSafeProbeInterval
                 : Constants.magSafeRetryInterval
-            if now.timeIntervalSince(lastMagSafeProbe) >= probeInterval {
-                magSafeControlAvailable = magSafeLED.probe()
+            if magSafeReconciliationRequested || now.timeIntervalSince(lastMagSafeProbe) >= probeInterval {
+                magSafeRawValue = magSafeLED.currentValue()
+                magSafeControlAvailable = magSafeRawValue != nil
                 lastMagSafeProbe = now
             }
         } else {
             magSafeControlAvailable = false
+            magSafeRawValue = nil
         }
 
         let selected = IndicatorOutputRouting.select(
@@ -249,8 +263,14 @@ final class IndicatorDaemon: @unchecked Sendable {
 
     private func switchOutput(to selected: IndicatorOutput, now: Date) {
         if output == .magSafe {
-            _ = magSafeLED.setMode(.system)
-            appliedMagSafeMode = .system
+            if magSafeLED.setMode(.system) {
+                appliedMagSafeMode = .system
+                magSafeRawValue = MagSafeLEDMode.system.aclcValue
+                magSafeLastWriteAt = now
+            } else {
+                appliedMagSafeMode = nil
+                magSafeRawValue = nil
+            }
         }
 
         output = selected
@@ -274,14 +294,22 @@ final class IndicatorDaemon: @unchecked Sendable {
     ) {
         if output == .magSafe {
             let requestedMode = IndicatorOutputRouting.magSafeMode(for: mode)
-            if requestedMode != appliedMagSafeMode {
+            if IndicatorOutputRouting.shouldApplyMagSafeMode(
+                requested: requestedMode,
+                applied: appliedMagSafeMode,
+                currentValue: magSafeRawValue,
+                reconciliationRequested: magSafeReconciliationRequested
+            ) {
                 guard magSafeLED.setMode(requestedMode) else {
                     magSafeControlAvailable = false
+                    magSafeRawValue = nil
                     switchOutput(to: .capsLock, now: now)
                     applyCapsLockLED(for: mode, actualCapsLockState: actualCapsLockState, now: now)
                     return
                 }
                 appliedMagSafeMode = requestedMode
+                magSafeRawValue = requestedMode.aclcValue
+                magSafeLastWriteAt = now
                 ledOn = requestedMode != .system && requestedMode != .off
             }
             return
@@ -329,6 +357,12 @@ final class IndicatorDaemon: @unchecked Sendable {
     }
 
     private func writeStatusIfNeeded(mode: IndicatorMode, now: Date, force: Bool = false) {
+        let expectedMagSafeValue = output == .magSafe
+            ? IndicatorOutputRouting.magSafeMode(for: mode).aclcValue
+            : nil
+        let magSafeSynchronized = expectedMagSafeValue.flatMap { expected in
+            magSafeRawValue.map { $0 == expected }
+        }
         let fingerprint = DaemonStatusFingerprint(
             mode: mode,
             output: output,
@@ -338,6 +372,10 @@ final class IndicatorDaemon: @unchecked Sendable {
             magSafeConnected: magSafeSnapshot.connected,
             magSafeControlAvailable: magSafeControlAvailable,
             magSafeLEDMode: appliedMagSafeMode,
+            magSafeRawValue: magSafeRawValue,
+            magSafeExpectedValue: expectedMagSafeValue,
+            magSafeSynchronized: magSafeSynchronized,
+            magSafeLastWriteAt: magSafeLastWriteAt,
             activeSessions: tracker.sessions.count,
             codexProcessRunning: codexRunning,
             claudeProcessRunning: claudeRunning
@@ -359,6 +397,10 @@ final class IndicatorDaemon: @unchecked Sendable {
             magSafeConnected: magSafeSnapshot.connected,
             magSafeControlAvailable: magSafeControlAvailable,
             magSafeLEDMode: appliedMagSafeMode,
+            magSafeRawValue: magSafeRawValue,
+            magSafeExpectedValue: expectedMagSafeValue,
+            magSafeSynchronized: magSafeSynchronized,
+            magSafeLastWriteAt: magSafeLastWriteAt,
             activeSessions: tracker.sessions.count,
             codexProcessRunning: codexRunning,
             claudeProcessRunning: claudeRunning,
@@ -395,6 +437,23 @@ final class IndicatorDaemon: @unchecked Sendable {
         }
     }
 
+    private func installWorkspaceObservers() {
+        let center = NSWorkspace.shared.notificationCenter
+        let wakeObserver = center.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else {
+                return
+            }
+            queue.async { [weak self] in
+                self?.magSafeReconciliationRequested = true
+            }
+        }
+        workspaceObservers.append(wakeObserver)
+    }
+
     private func acquireSingletonLock() throws {
         lockDescriptor = open(paths.lockFile.path, O_RDWR | O_CREAT, 0o600)
         guard lockDescriptor >= 0 else {
@@ -410,11 +469,23 @@ final class IndicatorDaemon: @unchecked Sendable {
     private func shutdown() -> Never {
         stopping = true
         timer?.cancel()
+        for observer in workspaceObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        workspaceObservers.removeAll()
         tracker.clear()
-        _ = magSafeLED.setMode(.system)
+        let now = Date()
+        if magSafeLED.setMode(.system) {
+            appliedMagSafeMode = .system
+            magSafeRawValue = MagSafeLEDMode.system.aclcValue
+            magSafeLastWriteAt = now
+        } else {
+            appliedMagSafeMode = nil
+            magSafeRawValue = nil
+        }
         _ = led.restoreActualCapsLockIndicator()
         ledOn = led.actualCapsLockState
-        writeStatusIfNeeded(mode: .off, now: Date(), force: true)
+        writeStatusIfNeeded(mode: .off, now: now, force: true)
         if lockDescriptor >= 0 {
             _ = flock(lockDescriptor, LOCK_UN)
             close(lockDescriptor)

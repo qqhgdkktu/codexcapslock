@@ -23,4 +23,15 @@ enum IndicatorOutputRouting {
             .system
         }
     }
+
+    static func shouldApplyMagSafeMode(
+        requested: MagSafeLEDMode,
+        applied: MagSafeLEDMode?,
+        currentValue: UInt8?,
+        reconciliationRequested: Bool
+    ) -> Bool {
+        reconciliationRequested
+            || requested != applied
+            || currentValue.map { $0 != requested.aclcValue } == true
+    }
 }

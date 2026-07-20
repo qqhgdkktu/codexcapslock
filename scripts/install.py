@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from privileged_subprocess import administrator_run
+
 
 LABEL = "com.mikita.codex-capslock-indicator"
 MAGSAFE_LABEL = "com.mikita.codex-capslock-indicator.magsafe"
@@ -71,25 +73,84 @@ def run(command: list[str], *, check: bool = True, capture: bool = False) -> sub
     )
 
 
-def administrator_run(shell_command: str) -> subprocess.CompletedProcess[str]:
-    apple_script = (
-        f"do shell script {json.dumps(shell_command, ensure_ascii=False)} "
-        "with administrator privileges"
-    )
-    return subprocess.run(
-        ["/usr/bin/osascript", "-e", apple_script],
-        cwd=ROOT,
-        check=True,
-        text=True,
-    )
-
-
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def build_privileged_magsafe_install_command(
+    staged_helper: Path,
+    staged_plist: Path,
+    expected_helper_hash: str,
+    expected_plist_hash: str,
+) -> str:
+    root_helper_staging = MAGSAFE_HELPER.with_name(f".{MAGSAFE_HELPER.name}.new")
+    root_plist_staging = MAGSAFE_LAUNCH_DAEMON.with_name(
+        f".{MAGSAFE_LAUNCH_DAEMON.name}.new"
+    )
+    cleanup = shlex.join([
+        "/bin/rm",
+        "-f",
+        str(root_helper_staging),
+        str(root_plist_staging),
+    ])
+
+    def verify_hash(path: Path, expected_hash: str, variable: str) -> str:
+        assignment = (
+            f"{variable}=$(/usr/bin/shasum -a 256 {shlex.quote(str(path))})"
+        )
+        comparison = (
+            f'/bin/test "${{{variable}%% *}}" = {shlex.quote(expected_hash)}'
+        )
+        return f"{assignment} && {comparison}"
+
+    commands = [
+        f"trap {shlex.quote(cleanup)} EXIT",
+        shlex.join([
+            "/usr/bin/install",
+            "-d",
+            "-o",
+            "root",
+            "-g",
+            "wheel",
+            "-m",
+            "755",
+            str(MAGSAFE_HELPER.parent),
+        ]),
+        cleanup,
+        shlex.join([
+            "/usr/bin/install",
+            "-o",
+            "root",
+            "-g",
+            "wheel",
+            "-m",
+            "755",
+            str(staged_helper),
+            str(root_helper_staging),
+        ]),
+        verify_hash(root_helper_staging, expected_helper_hash, "helper_hash"),
+        shlex.join([
+            "/usr/bin/install",
+            "-o",
+            "root",
+            "-g",
+            "wheel",
+            "-m",
+            "644",
+            str(staged_plist),
+            str(root_plist_staging),
+        ]),
+        verify_hash(root_plist_staging, expected_plist_hash, "plist_hash"),
+        f"({shlex.join(['/bin/launchctl', 'bootout', 'system', str(MAGSAFE_LAUNCH_DAEMON)])} >/dev/null 2>&1 || true)",
+        shlex.join(["/bin/mv", "-f", str(root_helper_staging), str(MAGSAFE_HELPER)]),
+        shlex.join(["/bin/mv", "-f", str(root_plist_staging), str(MAGSAFE_LAUNCH_DAEMON)]),
+        shlex.join(["/bin/launchctl", "bootstrap", "system", str(MAGSAFE_LAUNCH_DAEMON)]),
+    ]
+    return " && ".join(commands)
 
 
 def backup_user_files() -> Path:
@@ -229,7 +290,7 @@ class AppServerClient:
                 "clientInfo": {
                     "name": "codex_capslock_indicator_installer",
                     "title": "Codex Caps Lock Indicator Installer",
-                    "version": "1.3.0",
+                    "version": "1.3.1",
                 }
             },
         )
@@ -420,15 +481,15 @@ def install_magsafe_helper() -> str:
         os.chmod(staged_helper, 0o755)
         with temporary_plist.open("wb") as handle:
             plistlib.dump(document, handle, fmt=plistlib.FMT_XML, sort_keys=True)
-
-        privileged_commands = [
-            f"({shlex.join(['/bin/launchctl', 'bootout', 'system', str(MAGSAFE_LAUNCH_DAEMON)])} >/dev/null 2>&1 || true)",
-            shlex.join(["/usr/bin/install", "-d", "-o", "root", "-g", "wheel", "-m", "755", str(MAGSAFE_HELPER.parent)]),
-            shlex.join(["/usr/bin/install", "-o", "root", "-g", "wheel", "-m", "755", str(staged_helper), str(MAGSAFE_HELPER)]),
-            shlex.join(["/usr/bin/install", "-o", "root", "-g", "wheel", "-m", "644", str(temporary_plist), str(MAGSAFE_LAUNCH_DAEMON)]),
-            shlex.join(["/bin/launchctl", "bootstrap", "system", str(MAGSAFE_LAUNCH_DAEMON)]),
-        ]
-        administrator_run(" && ".join(privileged_commands))
+        administrator_run(
+            build_privileged_magsafe_install_command(
+                staged_helper,
+                temporary_plist,
+                expected_hash,
+                sha256(temporary_plist),
+            ),
+            cwd=ROOT,
+        )
     finally:
         shutil.rmtree(staging_directory, ignore_errors=True)
 

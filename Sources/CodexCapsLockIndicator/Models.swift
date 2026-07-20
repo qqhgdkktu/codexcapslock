@@ -71,6 +71,10 @@ struct DaemonStatus: Codable, Sendable {
     let magSafeConnected: Bool
     let magSafeControlAvailable: Bool
     let magSafeLEDMode: MagSafeLEDMode?
+    let magSafeRawValue: UInt8?
+    let magSafeExpectedValue: UInt8?
+    let magSafeSynchronized: Bool?
+    let magSafeLastWriteAt: Date?
     let activeSessions: Int
     let codexProcessRunning: Bool
     let claudeProcessRunning: Bool?
@@ -87,7 +91,7 @@ enum TranscriptEvent: Equatable, Sendable {
 }
 
 enum Constants {
-    static let version = "1.3.0"
+    static let version = "1.3.1"
     static let blinkHalfPeriod: TimeInterval = 0.5
     static let tickInterval: TimeInterval = 0.25
     static let magSafeConnectionPollInterval: TimeInterval = 1.0

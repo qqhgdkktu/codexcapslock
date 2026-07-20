@@ -132,6 +132,18 @@ enum CodexCapsLockIndicatorMain {
         let magSafeConnection = status.magSafeConnected ? "подключён" : "не подключён"
         let magSafeControl = status.magSafeControlAvailable ? "доступно" : "недоступно"
         print("MagSafe: \(magSafeConnection), управление \(magSafeControl)")
+        let rawValue = status.magSafeRawValue.map(String.init) ?? "нет данных"
+        let expectedValue = status.magSafeExpectedValue.map(String.init) ?? "не применяется"
+        let synchronized: String
+        switch status.magSafeSynchronized {
+        case true: synchronized = "да"
+        case false: synchronized = "нет"
+        case nil: synchronized = "не проверяется"
+        }
+        print("MagSafe ACLC: текущее \(rawValue), ожидаемое \(expectedValue), синхронизировано: \(synchronized)")
+        if let lastWrite = status.magSafeLastWriteAt {
+            print("Последняя запись MagSafe: \(ISO8601DateFormatter().string(from: lastWrite))")
+        }
         print("Codex: \(status.codexProcessRunning ? "запущен" : "не запущен")")
         print("Claude Code: \((status.claudeProcessRunning ?? false) ? "запущен" : "не запущен")")
         print("Активных сессий: \(status.activeSessions)")
@@ -205,10 +217,19 @@ enum CodexCapsLockIndicatorMain {
     private static func inspectMagSafe() {
         let snapshot = MagSafeConnectionDetector().snapshot()
         let controller = MagSafeLEDController()
+        let helperAlive = controller.ping()
+        let controlSupported = helperAlive && controller.probe()
+        let rawValue = controlSupported ? controller.currentValue() : nil
         print("Порт MagSafe: \(snapshot.portPresent ? "найден" : "не найден")")
+        print("ConnectionActive: \(snapshot.connectionActive ? "да" : "нет")")
         print("Физическое подключение: \(snapshot.connected ? "да" : "нет")")
         print("Внешнее питание: \(snapshot.externalPowerAttached ? "да" : "нет")")
-        print("Управление LED: \(controller.probe() ? "доступно" : "недоступно")")
+        print("Привилегированный helper: \(helperAlive ? "отвечает" : "недоступен")")
+        print("Ключ ACLC: \(controlSupported ? "поддерживается" : "недоступен")")
+        if let rawValue {
+            let mode = MagSafeLEDMode(aclcValue: rawValue)?.rawValue ?? "неизвестный"
+            print("Текущее ACLC: \(rawValue) (\(mode))")
+        }
     }
 
     private static func controlMagSafe(_ command: String) throws {

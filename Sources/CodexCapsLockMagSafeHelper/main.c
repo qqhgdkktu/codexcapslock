@@ -10,11 +10,13 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #define SOCKET_PATH "/var/run/com.mikita.codex-capslock-indicator.magsafe.sock"
 #define MAX_COMMAND_LENGTH 64
+#define CLIENT_TIMEOUT_SECONDS 1
 
 static volatile sig_atomic_t stopping = 0;
 static int server_socket = -1;
@@ -28,12 +30,84 @@ static void handle_signal(int signal_number) {
     }
 }
 
+static int write_all(int descriptor, const char *bytes, size_t length) {
+    size_t offset = 0;
+    while (offset < length) {
+        ssize_t count = write(descriptor, bytes + offset, length - offset);
+        if (count > 0) {
+            offset += (size_t)count;
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void send_response(int client, int status, const char *message) {
     char response[320];
     int length = snprintf(response, sizeof(response), "%d\t%s\n", status, message);
-    if (length > 0) {
-        (void)write(client, response, (size_t)length);
+    if (length > 0 && (size_t)length < sizeof(response)) {
+        (void)write_all(client, response, (size_t)length);
     }
+}
+
+static int configure_client_socket(int client) {
+    struct timeval timeout = {
+        .tv_sec = CLIENT_TIMEOUT_SECONDS,
+        .tv_usec = 0,
+    };
+    int no_signal = 1;
+    return setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0
+        && setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0
+        && setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &no_signal, sizeof(no_signal)) == 0;
+}
+
+static int read_command(int client, char command[MAX_COMMAND_LENGTH + 1]) {
+    size_t length = 0;
+    int terminated = 0;
+
+    while (!terminated) {
+        unsigned char buffer[32];
+        ssize_t count = read(client, buffer, sizeof(buffer));
+        if (count == 0) {
+            break;
+        }
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return 0;
+        }
+
+        for (ssize_t index = 0; index < count; index += 1) {
+            unsigned char byte = buffer[index];
+            if (byte == '\0') {
+                return 0;
+            }
+            if (byte == '\r' || byte == '\n') {
+                terminated = 1;
+                for (ssize_t trailing = index + 1; trailing < count; trailing += 1) {
+                    if (buffer[trailing] != '\r' && buffer[trailing] != '\n') {
+                        return 0;
+                    }
+                }
+                break;
+            }
+            if (length >= MAX_COMMAND_LENGTH) {
+                return 0;
+            }
+            command[length] = (char)byte;
+            length += 1;
+        }
+    }
+
+    if (length == 0) {
+        return 0;
+    }
+    command[length] = '\0';
+    return 1;
 }
 
 static int active_console_user(uid_t *uid) {
@@ -186,20 +260,19 @@ int main(void) {
             continue;
         }
 
-        char command[MAX_COMMAND_LENGTH + 2];
-        ssize_t count = read(client, command, sizeof(command) - 1);
-        if (count <= 0 || count > MAX_COMMAND_LENGTH) {
+        if (!configure_client_socket(client)) {
+            send_response(client, 70, "Unable to configure client socket");
+            close(client);
+            continue;
+        }
+
+        char command[MAX_COMMAND_LENGTH + 1];
+        if (!read_command(client, command)) {
             send_response(client, 64, "Invalid command");
             close(client);
             continue;
         }
-        command[count] = '\0';
-        command[strcspn(command, "\r\n")] = '\0';
-        if (command[0] == '\0') {
-            send_response(client, 64, "Empty command");
-        } else {
-            process_command(client, command);
-        }
+        process_command(client, command);
         close(client);
     }
 

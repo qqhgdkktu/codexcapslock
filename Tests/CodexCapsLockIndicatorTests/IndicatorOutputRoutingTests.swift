@@ -60,3 +60,39 @@ func lifecycleMapsToMagSafeModes() {
     #expect(IndicatorOutputRouting.magSafeMode(for: .done) == .green)
     #expect(IndicatorOutputRouting.magSafeMode(for: .off) == .system)
 }
+
+@Test("MagSafe firmware modes expose their ACLC values")
+func magSafeModesExposeFirmwareValues() {
+    #expect(MagSafeLEDMode.system.aclcValue == 0)
+    #expect(MagSafeLEDMode.off.aclcValue == 1)
+    #expect(MagSafeLEDMode.green.aclcValue == 3)
+    #expect(MagSafeLEDMode.orange.aclcValue == 4)
+    #expect(MagSafeLEDMode.flash.aclcValue == 5)
+    #expect(MagSafeLEDMode.blinkSlow.aclcValue == 6)
+    #expect(MagSafeLEDMode.blinkFast.aclcValue == 7)
+    #expect(MagSafeLEDMode.blinkOff.aclcValue == 19)
+    #expect(MagSafeLEDMode(aclcValue: 6) == .blinkSlow)
+    #expect(MagSafeLEDMode(aclcValue: 2) == nil)
+}
+
+@Test("MagSafe output is reapplied after wake or firmware drift")
+func magSafeReconciliationDetectsDrift() {
+    #expect(IndicatorOutputRouting.shouldApplyMagSafeMode(
+        requested: .green,
+        applied: .green,
+        currentValue: 0,
+        reconciliationRequested: false
+    ))
+    #expect(IndicatorOutputRouting.shouldApplyMagSafeMode(
+        requested: .green,
+        applied: .green,
+        currentValue: 3,
+        reconciliationRequested: true
+    ))
+    #expect(!IndicatorOutputRouting.shouldApplyMagSafeMode(
+        requested: .green,
+        applied: .green,
+        currentValue: 3,
+        reconciliationRequested: false
+    ))
+}

@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from privileged_subprocess import administrator_run
+
 
 LABEL = "com.mikita.codex-capslock-indicator"
 MAGSAFE_LABEL = "com.mikita.codex-capslock-indicator.magsafe"
@@ -133,15 +135,7 @@ def remove_magsafe_helper() -> bool:
         str(MAGSAFE_SOCKET),
     ])
     command = f"({bootout} >/dev/null 2>&1 || true) && {remove}"
-    apple_script = (
-        f"do shell script {json.dumps(command, ensure_ascii=False)} "
-        "with administrator privileges"
-    )
-    subprocess.run(
-        ["/usr/bin/osascript", "-e", apple_script],
-        check=True,
-        text=True,
-    )
+    administrator_run(command)
     return True
 
 
