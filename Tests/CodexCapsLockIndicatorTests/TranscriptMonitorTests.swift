@@ -4,6 +4,7 @@ import Testing
 
 @Test("transcript monitor recognizes a complete interactive lifecycle")
 func transcriptLifecycle() throws {
+    let now = try #require(ISO8601DateFormatter().date(from: "2026-07-20T14:06:07Z"))
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     let day = root.appendingPathComponent("2026/07/20", isDirectory: true)
@@ -20,8 +21,9 @@ func transcriptLifecycle() throws {
         #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}"#,
     ]
     try (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: file.path)
 
-    let events = TranscriptMonitor(sessionsDirectory: root).poll()
+    let events = TranscriptMonitor(sessionsDirectory: root).poll(now: now)
     #expect(events == [
         .turnStarted(sessionID: sessionID, turnID: "turn"),
         .waitingForInput(sessionID: sessionID, callID: "call"),
@@ -32,6 +34,7 @@ func transcriptLifecycle() throws {
 
 @Test("transcript monitor skips an oversized historical line and reads the recent lifecycle tail")
 func transcriptTailIsBounded() throws {
+    let now = try #require(ISO8601DateFormatter().date(from: "2026-07-20T14:06:07Z"))
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     let day = root.appendingPathComponent("2026/07/20", isDirectory: true)
@@ -46,8 +49,9 @@ func transcriptTailIsBounded() throws {
     let completion = #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"recent"}}"#
     try (oversizedHistoricalLine + "\n" + completion + "\n")
         .write(to: file, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: file.path)
 
-    let events = TranscriptMonitor(sessionsDirectory: root).poll()
+    let events = TranscriptMonitor(sessionsDirectory: root).poll(now: now)
     #expect(events == [
         .turnCompleted(sessionID: sessionID, turnID: "recent"),
     ])
