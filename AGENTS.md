@@ -80,6 +80,9 @@ For `done` on the Caps Lock output, acknowledgement can come from the `ack` comm
 ## Repository map
 
 - `Sources/CodexCapsLockIndicator/IndicatorDaemon.swift`: scheduler, lifecycle aggregation, acknowledgement, LED application, shutdown.
+- `Sources/CodexCapsLockIndicator/ActivityTracker.swift`: causal lifecycle reducer, active generations, immutable completion queue.
+- `Sources/CodexCapsLockIndicator/DaemonControl.swift`: private user control socket and single-owner maintenance routing.
+- `Sources/CodexCapsLockIndicator/StateStore.swift`: atomic durable reducer snapshot and v1 journal migration.
 - `Sources/CodexCapsLockIndicator/MagSafeConnectionDetector.swift`: physical type-17 MagSafe detection with external-power corroboration.
 - `Sources/CodexCapsLockIndicator/MagSafeLEDController.swift`: bounded local UNIX-socket client.
 - `Sources/CodexCapsLockMagSafeHelper/main.c` and `Sources/MagSafeSMC`: root helper and SMC `ACLC` access.
@@ -87,8 +90,8 @@ For `done` on the Caps Lock output, acknowledgement can come from the `ack` comm
 - `Sources/CodexCapsLockIndicator/CompletionAcknowledgementPolicy.swift`: pure acknowledgement timing and Caps Lock transition policy.
 - `Sources/CodexCapsLockIndicator/RawHIDCapsLockController.swift`: raw HID output access.
 - `Sources/CodexCapsLockIndicator/CapsLockModifierController.swift`: logical Caps Lock reset used only for physical acknowledgement.
-- `Sources/CodexCapsLockIndicator/HookJournal.swift`: privacy-limited hook metadata transport.
-- `Sources/CodexCapsLockIndicator/TranscriptMonitor.swift` and `CodexLogWatcher.swift`: fallback lifecycle sources.
+- `Sources/CodexCapsLockIndicator/HookJournal.swift`: bounded privacy-limited hook transport and offline spool.
+- `Sources/CodexCapsLockIndicator/TranscriptMonitor.swift` and `CodexLogWatcher.swift`: legacy compatibility parsers retained for tests; the daemon does not use them by default.
 - `scripts/install.py`: build, hardware verification, hook merge/trust, backup, installation.
 - `scripts/uninstall.py`: scoped removal of this project's installation.
 

@@ -13,12 +13,17 @@ One quiet hardware LED should show Codex or Claude Code state without trapping t
 
 ## State model
 
+- Lifecycle input is a versioned semantic event with bounded session/turn/call
+  identifiers. The reducer rejects duplicates, stale turns, invalid call
+  correlation and unreasonable clock skew.
 - `working`: use MagSafe firmware slow blink or blink Caps Lock every 0.5 seconds.
 - `waiting`: steady light until the requested approval or answer is handled.
 - `done / unread`: steady light until acknowledged.
 - `off / read`: restore MagSafe to system charging indication and Caps Lock to its real logical state.
 
 The earliest unread completion has priority over waiting and working sessions. Each acknowledgement removes only that first completion, then exposes the next completion or the current state of remaining sessions.
+Active generations and the immutable completion queue are saved atomically and
+survive daemon restart.
 
 ## Acknowledgement paths
 
@@ -38,6 +43,10 @@ The `waiting` state is deliberately not dismissible because it represents outsta
 - Keep the root helper local, fixed-command, active-console-user authenticated, and network-free.
 - Do not add windows, menu-bar rendering, animations, network requests, analytics, or GPU work.
 - Preserve foreign Codex and Claude Code hooks, settings, and the user's existing `notify` configuration.
+- Use hooks only by default. Do not read agent transcripts, prompts, answers,
+  commands, tool arguments, session paths, or local agent logs.
+- Keep runtime transport and state bounded; use private `0700/0600` paths and
+  reject symlinks or non-regular files.
 
 ## Success checks
 
@@ -48,6 +57,7 @@ The `waiting` state is deliberately not dismissible because it represents outsta
 - Foreground acknowledgement clears only the first Codex completion and never clears waiting work or a Claude Code completion.
 - New work after an acknowledgement starts blinking normally.
 - The user daemon stays below 0.5% average CPU in a representative 12-second sample, below 25 MB physical footprint, and uses no GPU process; the C helper blocks without polling.
-- Hook latency stays within the 250 ms scheduler interval.
+- Online hook delivery is applied through the private control socket without
+  waiting for the scheduler; the bounded spool is the startup/failure fallback.
 - Hooks do not spawn duplicate daemons while the singleton lock is held.
 - Unit tests, release build, hardware self-test, lifecycle smoke test, installation, and GitHub CI all pass.

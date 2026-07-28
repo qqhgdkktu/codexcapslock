@@ -47,6 +47,9 @@ static uint32_t fourcc(const char key[5]) {
         | (uint32_t)key[3];
 }
 
+static const char ACLC_KEY[5] = "ACLC";
+static const char UI8_TYPE[5] = "ui8 ";
+
 static kern_return_t smc_open(io_connect_t *connection) {
     io_service_t service = IOServiceGetMatchingService(
         kIOMainPortDefault,
@@ -61,7 +64,7 @@ static kern_return_t smc_open(io_connect_t *connection) {
     return result;
 }
 
-static kern_return_t smc_call(
+static int smc_call(
     io_connect_t connection,
     SMCParamStruct *input,
     SMCParamStruct *output
@@ -69,7 +72,7 @@ static kern_return_t smc_call(
     size_t inputSize = sizeof(*input);
     size_t outputSize = sizeof(*output);
     memset(output, 0, sizeof(*output));
-    return IOConnectCallStructMethod(
+    kern_return_t transport = IOConnectCallStructMethod(
         connection,
         2,
         input,
@@ -77,9 +80,22 @@ static kern_return_t smc_call(
         output,
         &outputSize
     );
+    if (transport != KERN_SUCCESS) {
+        return (int)transport;
+    }
+    if (outputSize != sizeof(*output)) {
+        return CODEX_SMC_ERROR_OUTPUT_SIZE;
+    }
+    if (output->result != 0) {
+        return CODEX_SMC_ERROR_RESULT;
+    }
+    if (output->status != 0) {
+        return CODEX_SMC_ERROR_STATUS;
+    }
+    return 0;
 }
 
-static kern_return_t get_key_info(
+static int get_key_info(
     io_connect_t connection,
     uint32_t key,
     SMCKeyInfoData *info
@@ -89,67 +105,97 @@ static kern_return_t get_key_info(
     input.key = key;
     input.data8 = 9;
 
-    kern_return_t result = smc_call(connection, &input, &output);
-    if (result == KERN_SUCCESS) {
+    int result = smc_call(connection, &input, &output);
+    if (result == 0) {
         *info = output.keyInfo;
     }
     return result;
 }
 
-int codex_smc_write_u8(const char key[5], uint8_t value) {
-    io_connect_t connection = IO_OBJECT_NULL;
-    kern_return_t result = smc_open(&connection);
-    if (result != KERN_SUCCESS) {
-        return (int)result;
+static int validate_aclc_info(const SMCKeyInfoData *info) {
+    if (info->dataSize != 1) {
+        return CODEX_SMC_ERROR_KEY_SIZE;
     }
-
-    SMCKeyInfoData info = {0};
-    uint32_t encodedKey = fourcc(key);
-    result = get_key_info(connection, encodedKey, &info);
-    if (result != KERN_SUCCESS) {
-        IOServiceClose(connection);
-        return (int)result;
+    if (info->dataType != fourcc(UI8_TYPE)) {
+        return CODEX_SMC_ERROR_KEY_TYPE;
     }
-
-    SMCParamStruct input = {0};
-    SMCParamStruct output = {0};
-    input.key = encodedKey;
-    input.data8 = 6;
-    input.keyInfo.dataSize = info.dataSize ? info.dataSize : 1;
-    input.bytes[0] = value;
-    result = smc_call(connection, &input, &output);
-    IOServiceClose(connection);
-    return (int)result;
+    return 0;
 }
 
-int codex_smc_read_u8(const char key[5], uint8_t *value) {
-    if (value == NULL) {
-        return -1;
-    }
-
-    io_connect_t connection = IO_OBJECT_NULL;
-    kern_return_t result = smc_open(&connection);
-    if (result != KERN_SUCCESS) {
-        return (int)result;
-    }
-
+static int read_aclc(io_connect_t connection, uint8_t *value) {
     SMCKeyInfoData info = {0};
-    uint32_t encodedKey = fourcc(key);
-    result = get_key_info(connection, encodedKey, &info);
-    if (result != KERN_SUCCESS) {
-        IOServiceClose(connection);
-        return (int)result;
+    uint32_t encodedKey = fourcc(ACLC_KEY);
+    int result = get_key_info(connection, encodedKey, &info);
+    if (result != 0) {
+        return result;
+    }
+    result = validate_aclc_info(&info);
+    if (result != 0) {
+        return result;
     }
 
     SMCParamStruct input = {0};
     SMCParamStruct output = {0};
     input.key = encodedKey;
     input.data8 = 5;
-    input.keyInfo.dataSize = info.dataSize ? info.dataSize : 1;
+    input.keyInfo.dataSize = 1;
     result = smc_call(connection, &input, &output);
-    if (result == KERN_SUCCESS) {
+    if (result == 0) {
         *value = output.bytes[0];
     }
+    return result;
+}
+
+int codex_smc_set_aclc(uint8_t value) {
+    io_connect_t connection = IO_OBJECT_NULL;
+    kern_return_t result = smc_open(&connection);
+    if (result != KERN_SUCCESS) {
+        return (int)result;
+    }
+
+    SMCKeyInfoData info = {0};
+    uint32_t encodedKey = fourcc(ACLC_KEY);
+    int operation = get_key_info(connection, encodedKey, &info);
+    if (operation != 0) {
+        IOServiceClose(connection);
+        return operation;
+    }
+    operation = validate_aclc_info(&info);
+    if (operation != 0) {
+        IOServiceClose(connection);
+        return operation;
+    }
+
+    SMCParamStruct input = {0};
+    SMCParamStruct output = {0};
+    input.key = encodedKey;
+    input.data8 = 6;
+    input.keyInfo.dataSize = 1;
+    input.bytes[0] = value;
+    operation = smc_call(connection, &input, &output);
+    if (operation == 0) {
+        uint8_t actual = 0;
+        operation = read_aclc(connection, &actual);
+        if (operation == 0 && actual != value) {
+            operation = CODEX_SMC_ERROR_READBACK;
+        }
+    }
     IOServiceClose(connection);
-    return (int)result;
+    return operation;
+}
+
+int codex_smc_get_aclc(uint8_t *value) {
+    if (value == NULL) {
+        return CODEX_SMC_ERROR_ARGUMENT;
+    }
+
+    io_connect_t connection = IO_OBJECT_NULL;
+    kern_return_t result = smc_open(&connection);
+    if (result != KERN_SUCCESS) {
+        return (int)result;
+    }
+
+    int operation = read_aclc(connection, value);
+    IOServiceClose(connection);
+    return operation;
 }

@@ -39,8 +39,9 @@ class HookConfigurationTests(unittest.TestCase):
             )
         )
         first_hash_check = command.index("/usr/bin/shasum -a 256")
-        bootout = command.index("/bin/launchctl bootout")
-        bootstrap = command.index("/bin/launchctl bootstrap")
+        commit = command.index("commit_started=1")
+        bootout = command.index("/bin/launchctl bootout", commit)
+        bootstrap = command.index("/bin/launchctl bootstrap", bootout)
 
         self.assertIn(helper_staging, command)
         self.assertIn(plist_staging, command)
@@ -48,7 +49,8 @@ class HookConfigurationTests(unittest.TestCase):
         self.assertIn("b" * 64, command)
         self.assertIn("/bin/test", command)
         self.assertNotIn("/usr/bin/test", command)
-        self.assertLess(first_hash_check, bootout)
+        self.assertLess(first_hash_check, commit)
+        self.assertLess(commit, bootout)
         self.assertLess(bootout, bootstrap)
         self.assertIn("trap ", command)
 
@@ -108,7 +110,7 @@ class HookConfigurationTests(unittest.TestCase):
             indicator_commands = [
                 command
                 for command in commands
-                if indicator_install.HOOK_MARKER in command
+                if indicator_install.parse_indicator_hook(command) is not None
             ]
             self.assertIn("/usr/local/bin/foreign-hook", commands)
             self.assertEqual(len(indicator_commands), len(indicator_install.CLAUDE_HOOKS))

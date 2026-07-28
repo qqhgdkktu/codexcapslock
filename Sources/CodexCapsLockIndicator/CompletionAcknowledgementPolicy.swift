@@ -7,30 +7,34 @@ enum CompletionAcknowledgementReason: Equatable, Sendable {
 
 struct CompletionAcknowledgementPolicy: Sendable {
     private var observedMode: IndicatorMode = .off
-    private var observedCompletionID: String?
-    private var doneSince: Date?
-    private var codexFrontmostSince: Date?
+    private var observedCompletionID: UUID?
+    private var doneSince: TimeInterval?
+    private var codexFrontmostSince: TimeInterval?
     private var lastCapsLockState: Bool
 
     init(initialCapsLockState: Bool) {
         lastCapsLockState = initialCapsLockState
     }
 
+    mutating func resetCapsLockBaseline(_ actualCapsLockState: Bool) {
+        lastCapsLockState = actualCapsLockState
+    }
+
     mutating func observe(
         mode: IndicatorMode,
-        completionID: String? = nil,
+        completionID: UUID? = nil,
         codexFrontmost: Bool,
         actualCapsLockState: Bool,
         capsLockAcknowledgementEnabled: Bool = true,
-        at date: Date = Date()
+        at uptime: TimeInterval = ProcessInfo.processInfo.systemUptime
     ) -> CompletionAcknowledgementReason? {
         defer { lastCapsLockState = actualCapsLockState }
 
         if mode != observedMode || completionID != observedCompletionID {
             observedMode = mode
             observedCompletionID = completionID
-            doneSince = mode == .done ? date : nil
-            codexFrontmostSince = mode == .done && codexFrontmost ? date : nil
+            doneSince = mode == .done ? uptime : nil
+            codexFrontmostSince = mode == .done && codexFrontmost ? uptime : nil
         }
 
         guard mode == .done else {
@@ -42,15 +46,15 @@ struct CompletionAcknowledgementPolicy: Sendable {
         }
 
         if codexFrontmost {
-            codexFrontmostSince = codexFrontmostSince ?? date
+            codexFrontmostSince = codexFrontmostSince ?? uptime
         } else {
             codexFrontmostSince = nil
         }
 
         guard let doneSince,
               let codexFrontmostSince,
-              date.timeIntervalSince(doneSince) >= Constants.minimumDoneVisibility,
-              date.timeIntervalSince(codexFrontmostSince) >= Constants.codexFocusAcknowledgementDelay else {
+              uptime - doneSince >= Constants.minimumDoneVisibility,
+              uptime - codexFrontmostSince >= Constants.codexFocusAcknowledgementDelay else {
             return nil
         }
         return .codexViewed

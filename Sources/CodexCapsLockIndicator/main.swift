@@ -9,6 +9,8 @@ private enum CommandError: Error, CustomStringConvertible {
     case magSafeWriteFailed
     case statusUnavailable
     case selfTestFailed(String)
+    case hookPayloadTooLarge
+    case hardwareOwnedByDaemon
 
     var description: String {
         switch self {
@@ -19,6 +21,9 @@ private enum CommandError: Error, CustomStringConvertible {
         case .magSafeWriteFailed: "macOS не приняла команду управления LED MagSafe."
         case .statusUnavailable: "Индикатор ещё не запущен или не успел записать состояние."
         case let .selfTestFailed(message): "Самопроверка не пройдена: \(message)"
+        case .hookPayloadTooLarge: "Lifecycle hook payload превышает допустимый размер."
+        case .hardwareOwnedByDaemon:
+            "Аппаратный выход принадлежит daemon; используйте control-команду или остановите daemon."
         }
     }
 }
@@ -43,16 +48,16 @@ enum CodexCapsLockIndicatorMain {
 
         case "hook":
             guard (2...3).contains(arguments.count),
-                  let state = IndicatorMode(rawValue: arguments[1]),
+                  let action = LifecycleAction(rawValue: arguments[1]),
                   let source = CodingAgent(rawValue: arguments.count == 3 ? arguments[2] : "codex") else {
                 throw CommandError.invalidArguments(
-                    "Использование: hook working|waiting|done|off [codex|claude]"
+                    "Использование: hook EVENT [codex|claude]"
                 )
             }
-            let input = FileHandle.standardInput.readDataToEndOfFile()
             do {
+                let input = try readHookInput()
                 try HookJournalWriter(paths: paths).append(
-                    state: state,
+                    action: action,
                     source: source,
                     inputData: input
                 )
@@ -63,9 +68,65 @@ enum CodexCapsLockIndicatorMain {
             }
 
         case "status":
-            try printStatus(paths: paths)
+            guard arguments.count == 1
+                    || (arguments.count == 2 && arguments[1] == "--json") else {
+                throw CommandError.invalidArguments(
+                    "Использование: status [--json]"
+                )
+            }
+            try printStatus(paths: paths, json: arguments.count == 2)
 
         case "ack", "acknowledge":
+            guard arguments.count <= 2 else {
+                throw CommandError.invalidArguments(
+                    "Использование: ack [COMPLETION_ID|--all]"
+                )
+            }
+            if arguments.dropFirst().first == "--all" {
+                if let response = DaemonControlClient(
+                    socketURL: paths.controlSocket
+                ).send(.acknowledgeAll) {
+                    guard response.succeeded else {
+                        throw CommandError.invalidArguments(response.message)
+                    }
+                    print(response.message)
+                    return
+                }
+                try HookJournalWriter(paths: paths).appendAcknowledgementAll()
+                launchDaemonIfNeeded(paths: paths)
+                print("OK: все завершённые задачи отмечены просмотренными.")
+                return
+            }
+            if let rawCompletionID = arguments.dropFirst().first {
+                guard let completionID = UUID(uuidString: rawCompletionID) else {
+                    throw CommandError.invalidArguments(
+                        "Использование: ack [COMPLETION_ID|--all]"
+                    )
+                }
+                if let response = DaemonControlClient(
+                    socketURL: paths.controlSocket
+                ).sendAcknowledgement(completionID: completionID) {
+                    guard response.succeeded else {
+                        throw CommandError.invalidArguments(response.message)
+                    }
+                    print(response.message)
+                    return
+                }
+                try HookJournalWriter(paths: paths)
+                    .appendAcknowledgement(completionID: completionID)
+                launchDaemonIfNeeded(paths: paths)
+                print("OK: точное подтверждение \(completionID) поставлено в очередь.")
+                return
+            }
+            if let response = DaemonControlClient(
+                socketURL: paths.controlSocket
+            ).send(.acknowledgeNext) {
+                guard response.succeeded else {
+                    throw CommandError.invalidArguments(response.message)
+                }
+                print(response.message)
+                return
+            }
             try HookJournalWriter(paths: paths).appendAcknowledgement()
             launchDaemonIfNeeded(paths: paths)
             print("OK: первая завершённая задача отмечена просмотренной.")
@@ -74,12 +135,26 @@ enum CodexCapsLockIndicatorMain {
             guard arguments.count == 2 else {
                 throw CommandError.invalidArguments("Использование: led on|off|restore")
             }
-            try setLED(arguments[1])
+            try withExclusiveHardwareAccess(paths: paths) {
+                try setLED(arguments[1])
+            }
 
         case "inspect-led":
+            if let response = DaemonControlClient(
+                socketURL: paths.controlSocket
+            ).send(.inspectLED) {
+                print(response.message)
+                return
+            }
             inspectLED()
 
         case "inspect-magsafe":
+            if let response = DaemonControlClient(
+                socketURL: paths.controlSocket
+            ).send(.inspectMagSafe) {
+                print(response.message)
+                return
+            }
             inspectMagSafe()
 
         case "magsafe":
@@ -88,19 +163,66 @@ enum CodexCapsLockIndicatorMain {
                     "Использование: magsafe probe|status|system|green|blink-slow"
                 )
             }
-            try controlMagSafe(arguments[1])
+            try withExclusiveHardwareAccess(paths: paths) {
+                try controlMagSafe(arguments[1])
+            }
 
         case "raw-led":
             guard arguments.count == 2, ["on", "off"].contains(arguments[1]) else {
                 throw CommandError.invalidArguments("Использование: raw-led on|off")
             }
-            inspectRawLED(setTo: arguments[1] == "on")
+            try withExclusiveHardwareAccess(paths: paths) {
+                inspectRawLED(setTo: arguments[1] == "on")
+            }
 
         case "demo":
-            try runDemo()
+            if let response = DaemonControlClient(
+                socketURL: paths.controlSocket
+            ).send(.demo) {
+                guard response.succeeded else {
+                    throw CommandError.selfTestFailed(response.message)
+                }
+                print(response.message)
+                return
+            }
+            try withExclusiveHardwareAccess(paths: paths) {
+                try runDemo()
+            }
 
         case "self-test":
-            try runSelfTest()
+            if let response = DaemonControlClient(
+                socketURL: paths.controlSocket
+            ).send(.selfTest) {
+                guard response.succeeded else {
+                    throw CommandError.selfTestFailed(response.message)
+                }
+                print(response.message)
+                return
+            }
+            try withExclusiveHardwareAccess(paths: paths) {
+                try runSelfTest()
+            }
+
+        case "repair":
+            if let response = DaemonControlClient(
+                socketURL: paths.controlSocket
+            ).send(.repairOutputs) {
+                guard response.succeeded else {
+                    throw CommandError.selfTestFailed(response.message)
+                }
+                print(response.message)
+                return
+            }
+            try withExclusiveHardwareAccess(paths: paths) {
+                let magSafe = MagSafeLEDController()
+                defer { magSafe.closeLease() }
+                _ = magSafe.setMode(.system)
+                let controller = HIDCapsLockController()
+                guard controller.restoreActualCapsLockIndicator() else {
+                    throw CommandError.ledWriteFailed
+                }
+            }
+            print("Оба аппаратных выхода восстановлены.")
 
         case "version", "--version", "-V":
             print(Constants.version)
@@ -113,10 +235,24 @@ enum CodexCapsLockIndicatorMain {
         }
     }
 
-    private static func printStatus(paths: RuntimePaths) throws {
-        guard let data = try? Data(contentsOf: paths.statusFile),
-              let status = try? JSONDecoder.iso8601.decode(DaemonStatus.self, from: data) else {
+    private static func printStatus(paths: RuntimePaths, json: Bool) throws {
+        guard let data = readBoundedUserFile(
+                at: paths.statusFile,
+                maximumBytes: Constants.maximumStatusBytes
+              ),
+              let status = try? JSONDecoder.iso8601.decode(DaemonStatus.self, from: data),
+              Date().timeIntervalSince(status.updatedAt) <= 60,
+              kill(status.pid, 0) == 0,
+              daemonLockIsHeld(paths: paths) else {
             throw CommandError.statusUnavailable
+        }
+        if json {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            let encoded = try encoder.encode(status)
+            print(String(decoding: encoded, as: UTF8.self))
+            return
         }
 
         let labels: [IndicatorMode: String] = [
@@ -129,6 +265,18 @@ enum CodexCapsLockIndicatorMain {
         print("Индикатор: \(status.output == .magSafe ? "MagSafe" : "Caps Lock")")
         print("Клавиатура: \(status.keyboardName ?? "не найдена")")
         print("Индикация агентов: \(status.ledOn ? "активна" : "неактивна")")
+        if let logical = status.capsLockLogicalState {
+            let actual = status.capsLockLEDActual.map(String.init) ?? "нет данных"
+            let expected = status.capsLockLEDExpected.map(String.init)
+                ?? "нет данных"
+            let synchronized = status.capsLockSynchronized.map {
+                $0 ? "да" : "нет"
+            } ?? "не проверяется"
+            print(
+                "Caps Lock: логический \(logical), LED \(actual), "
+                    + "ожидаемый \(expected), синхронизировано: \(synchronized)"
+            )
+        }
         let magSafeConnection = status.magSafeConnected ? "подключён" : "не подключён"
         let magSafeControl = status.magSafeControlAvailable ? "доступно" : "недоступно"
         print("MagSafe: \(magSafeConnection), управление \(magSafeControl)")
@@ -145,8 +293,23 @@ enum CodexCapsLockIndicatorMain {
             print("Последняя запись MagSafe: \(ISO8601DateFormatter().string(from: lastWrite))")
         }
         print("Codex: \(status.codexProcessRunning ? "запущен" : "не запущен")")
-        print("Claude Code: \((status.claudeProcessRunning ?? false) ? "запущен" : "не запущен")")
+        let claudeProcess: String
+        switch status.claudeProcessRunning {
+        case true: claudeProcess = "запущен"
+        case false: claudeProcess = "не запущен"
+        case nil: claudeProcess = "не определяется в hooks-only режиме"
+        }
+        print("Claude Code: \(claudeProcess)")
         print("Активных сессий: \(status.activeSessions)")
+        print("Завершений в очереди: \(status.completionQueueDepth ?? 0)")
+        if let completionID = status.firstCompletionID {
+            let source = status.firstCompletionSource?.rawValue ?? "неизвестно"
+            let outcome = status.firstCompletionOutcome?.rawValue ?? "неизвестно"
+            print("Первое завершение: \(completionID) (\(source), \(outcome))")
+        }
+        if let protocolVersion = status.lifecycleProtocolVersion {
+            print("Lifecycle protocol: v\(protocolVersion)")
+        }
         print("PID: \(status.pid)")
         if status.mode == .done {
             if status.output == .magSafe {
@@ -157,6 +320,63 @@ enum CodexCapsLockIndicatorMain {
         }
     }
 
+    private static func readBoundedUserFile(
+        at url: URL,
+        maximumBytes: Int
+    ) -> Data? {
+        let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else {
+            return nil
+        }
+        defer { close(descriptor) }
+        var information = stat()
+        guard fstat(descriptor, &information) == 0,
+              (information.st_mode & S_IFMT) == S_IFREG,
+              information.st_uid == geteuid(),
+              information.st_nlink == 1,
+              information.st_size >= 0,
+              information.st_size <= off_t(maximumBytes) else {
+            return nil
+        }
+        var data = Data()
+        var buffer = [UInt8](
+            repeating: 0,
+            count: min(16_384, max(Int(information.st_size), 1))
+        )
+        while data.count < Int(information.st_size) {
+            let requested = min(
+                buffer.count,
+                Int(information.st_size) - data.count
+            )
+            let count = Darwin.read(descriptor, &buffer, requested)
+            if count > 0 {
+                data.append(contentsOf: buffer.prefix(count))
+            } else if count < 0, errno == EINTR {
+                continue
+            } else {
+                return nil
+            }
+        }
+        return data
+    }
+
+    private static func readHookInput() throws -> Data {
+        var data = Data()
+        while data.count <= Constants.maximumHookPayloadBytes {
+            let remaining = Constants.maximumHookPayloadBytes + 1 - data.count
+            guard let chunk = try FileHandle.standardInput.read(
+                upToCount: min(65_536, remaining)
+            ), !chunk.isEmpty else {
+                break
+            }
+            data.append(chunk)
+        }
+        guard data.count <= Constants.maximumHookPayloadBytes else {
+            throw CommandError.hookPayloadTooLarge
+        }
+        return data
+    }
+
     private static func launchDaemonIfNeeded(paths: RuntimePaths) {
         if ProcessInfo.processInfo.environment["CODEX_CAPS_INDICATOR_DISABLE_DAEMON_AUTOSTART"] == "1" {
             return
@@ -165,9 +385,47 @@ enum CodexCapsLockIndicatorMain {
             return
         }
 
+        let launchAgent = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+            .appendingPathComponent(
+                "com.mikita.codex-capslock-indicator.plist"
+            )
+        if FileManager.default.fileExists(atPath: launchAgent.path) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            process.arguments = [
+                "kickstart",
+                "gui/\(getuid())/com.mikita.codex-capslock-indicator",
+            ]
+            process.environment = [
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "LANG": "C",
+                "LC_ALL": "C",
+            ]
+            process.currentDirectoryURL = URL(fileURLWithPath: "/", isDirectory: true)
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            if (try? process.run()) != nil {
+                return
+            }
+        }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
         process.arguments = ["daemon"]
+        var environment = [
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "LANG": "C",
+            "LC_ALL": "C",
+        ]
+        for key in ["CODEX_HOME", "CODEX_CAPS_INDICATOR_STATE_DIR"] {
+            if let value = ProcessInfo.processInfo.environment[key] {
+                environment[key] = value
+            }
+        }
+        process.environment = environment
+        process.currentDirectoryURL = URL(fileURLWithPath: "/", isDirectory: true)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
@@ -175,17 +433,60 @@ enum CodexCapsLockIndicatorMain {
     }
 
     private static func daemonLockIsHeld(paths: RuntimePaths) -> Bool {
-        let descriptor = open(paths.lockFile.path, O_RDWR | O_CREAT, 0o600)
+        let descriptor = open(
+            paths.lockFile.path,
+            O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+            0o600
+        )
         guard descriptor >= 0 else {
-            return false
+            return true
         }
         defer { close(descriptor) }
+        var information = stat()
+        guard fstat(descriptor, &information) == 0,
+              (information.st_mode & S_IFMT) == S_IFREG,
+              information.st_uid == geteuid(),
+              information.st_nlink == 1,
+              fchmod(descriptor, 0o600) == 0 else {
+            return true
+        }
 
         if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
             _ = flock(descriptor, LOCK_UN)
             return false
         }
         return errno == EWOULDBLOCK || errno == EAGAIN
+    }
+
+    private static func withExclusiveHardwareAccess<T>(
+        paths: RuntimePaths,
+        operation: () throws -> T
+    ) throws -> T {
+        try paths.prepare()
+        let lockURL = paths.baseDirectory.appendingPathComponent("hardware.lock")
+        let descriptor = open(
+            lockURL.path,
+            O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+            0o600
+        )
+        guard descriptor >= 0 else {
+            throw CommandError.hardwareOwnedByDaemon
+        }
+        defer { close(descriptor) }
+        var information = stat()
+        guard fstat(descriptor, &information) == 0,
+              (information.st_mode & S_IFMT) == S_IFREG,
+              information.st_uid == geteuid(),
+              information.st_nlink == 1,
+              fchmod(descriptor, 0o600) == 0,
+              flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            throw CommandError.hardwareOwnedByDaemon
+        }
+        defer { _ = flock(descriptor, LOCK_UN) }
+        guard !daemonLockIsHeld(paths: paths) else {
+            throw CommandError.hardwareOwnedByDaemon
+        }
+        return try operation()
     }
 
     private static func setLED(_ value: String) throws {
@@ -378,9 +679,9 @@ enum CodexCapsLockIndicatorMain {
 
         Команды:
           daemon              запустить фоновый индикатор
-          hook STATE [AGENT]  принять событие Codex/Claude Code (working/waiting/done/off)
-          status              показать текущее состояние
-          ack                 погасить первое уведомление в очереди завершений
+          hook EVENT [AGENT]  принять semantic lifecycle event Codex/Claude Code
+          status [--json]     показать текущее состояние
+          ack [ID|--all]      подтвердить первое, указанное или все завершения
           led on|off|restore  напрямую проверить LED
           inspect-led         показать LED и реальный режим Caps Lock
           inspect-magsafe     показать подключение и доступность MagSafe
@@ -388,6 +689,7 @@ enum CodexCapsLockIndicatorMain {
           raw-led on|off      экспериментальный прямой HID output-report
           demo                показать выбранный автоматически индикатор
           self-test           проверить Caps Lock и подключённый MagSafe
+          repair              восстановить и согласовать оба аппаратных выхода
         """)
     }
 }

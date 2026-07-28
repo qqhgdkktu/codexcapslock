@@ -5,19 +5,55 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
 jobs:
   swift:
     runs-on: macos-26
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Show Swift version
         run: swift --version
       - name: Run tests
         run: swift test
       - name: Test hook configuration merge
         run: python3 -m unittest discover -s scripts/tests
+      - name: Compile Python scripts
+        run: python3 -m compileall -q scripts
+      - name: Check whitespace
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+          else
+            git show --check --format=fuller --no-renames HEAD
+          fi
+      - name: Build with C warnings
+        run: swift build -Xcc -Wall -Xcc -Wextra
       - name: Build release binary
         run: swift build -c release
+      - name: Verify release manifest
+        run: |
+          python3 scripts/release_manifest.py \
+            --output "$RUNNER_TEMP/release-manifest.json" \
+            --version 2.0.0
+          python3 -m json.tool "$RUNNER_TEMP/release-manifest.json" >/dev/null
+
+  address-sanitizer:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run tests with Address Sanitizer
+        run: swift test --sanitize=address

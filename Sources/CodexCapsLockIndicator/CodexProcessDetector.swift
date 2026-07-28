@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 struct CodexApplicationMonitor {
@@ -38,6 +39,10 @@ struct CodingAgentProcessDetector {
         process.arguments = ["-fl", "codex|claude"]
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in
+            finished.signal()
+        }
 
         do {
             try process.run()
@@ -48,8 +53,22 @@ struct CodingAgentProcessDetector {
             )
         }
 
+        var terminationObserved = finished.wait(timeout: .now() + 1) == .success
+        if !terminationObserved {
+            process.terminate()
+            terminationObserved = finished.wait(timeout: .now() + 0.2) == .success
+            if !terminationObserved {
+                _ = kill(process.processIdentifier, SIGKILL)
+                terminationObserved = finished.wait(timeout: .now() + 0.2) == .success
+            }
+        }
+        guard terminationObserved else {
+            return CodingAgentProcessState(
+                codexRunning: applicationMonitor.isRunning,
+                claudeRunning: false
+            )
+        }
         let output = try? pipe.fileHandleForReading.readToEnd()
-        process.waitUntilExit()
         guard process.terminationStatus == 0,
               let output,
               let text = String(data: output, encoding: .utf8) else {

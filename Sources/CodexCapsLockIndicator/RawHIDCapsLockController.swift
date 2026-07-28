@@ -12,18 +12,61 @@ struct RawHIDLEDTarget {
 final class RawHIDCapsLockController {
     private let manager: IOHIDManager
     private var cachedTargets: [RawHIDLEDTarget]?
+    private let cacheLock = NSLock()
 
     init() {
         manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        IOHIDManagerSetDeviceMatching(manager, nil)
+        IOHIDManagerSetDeviceMatching(
+            manager,
+            [
+                kIOHIDDeviceUsagePageKey: Int(kHIDPage_GenericDesktop),
+                kIOHIDDeviceUsageKey: Int(kHIDUsage_GD_Keyboard),
+                kIOHIDBuiltInKey: true,
+            ] as CFDictionary
+        )
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterDeviceMatchingCallback(
+            manager,
+            { context, _, _, _ in
+                guard let context else { return }
+                Unmanaged<RawHIDCapsLockController>
+                    .fromOpaque(context)
+                    .takeUnretainedValue()
+                    .invalidateTargets()
+            },
+            context
+        )
+        IOHIDManagerRegisterDeviceRemovalCallback(
+            manager,
+            { context, _, _, _ in
+                guard let context else { return }
+                Unmanaged<RawHIDCapsLockController>
+                    .fromOpaque(context)
+                    .takeUnretainedValue()
+                    .invalidateTargets()
+            },
+            context
+        )
+        IOHIDManagerScheduleWithRunLoop(
+            manager,
+            CFRunLoopGetMain(),
+            CFRunLoopMode.commonModes.rawValue
+        )
         IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
     }
 
     deinit {
+        IOHIDManagerUnscheduleFromRunLoop(
+            manager,
+            CFRunLoopGetMain(),
+            CFRunLoopMode.commonModes.rawValue
+        )
         IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
     }
 
     var targets: [RawHIDLEDTarget] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
         if let cachedTargets {
             return cachedTargets
         }
@@ -92,7 +135,7 @@ final class RawHIDCapsLockController {
             return (target, IOHIDDeviceSetValue(target.device, target.element, value))
         }
         if results.isEmpty || results.contains(where: { $0.1 != kIOReturnSuccess }) {
-            cachedTargets = nil
+            invalidateTargets()
         }
         return results
     }
@@ -111,5 +154,11 @@ final class RawHIDCapsLockController {
             return (result, nil)
         }
         return (result, IOHIDValueGetIntegerValue(valuePointer.pointee.takeUnretainedValue()))
+    }
+
+    private func invalidateTargets() {
+        cacheLock.lock()
+        cachedTargets = nil
+        cacheLock.unlock()
     }
 }

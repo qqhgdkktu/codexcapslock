@@ -4,7 +4,7 @@ import Testing
 
 @Test("a Caps Lock state change acknowledges a completed task")
 func capsLockAcknowledgement() {
-    let start = Date()
+    let start: TimeInterval = 100
     var policy = CompletionAcknowledgementPolicy(initialCapsLockState: false)
 
     #expect(policy.observe(
@@ -17,19 +17,19 @@ func capsLockAcknowledgement() {
         mode: .done,
         codexFrontmost: false,
         actualCapsLockState: false,
-        at: start.addingTimeInterval(1)
+        at: start + 1
     ) == nil)
     #expect(policy.observe(
         mode: .done,
         codexFrontmost: false,
         actualCapsLockState: true,
-        at: start.addingTimeInterval(1.25)
+        at: start + 1.25
     ) == .capsLockKey)
 }
 
 @Test("viewing Codex acknowledges only after the visibility dwell")
 func focusAcknowledgement() {
-    let start = Date()
+    let start: TimeInterval = 100
     var policy = CompletionAcknowledgementPolicy(initialCapsLockState: false)
 
     #expect(policy.observe(
@@ -42,25 +42,25 @@ func focusAcknowledgement() {
         mode: .done,
         codexFrontmost: true,
         actualCapsLockState: false,
-        at: start.addingTimeInterval(1.5)
+        at: start + 1.5
     ) == nil)
     #expect(policy.observe(
         mode: .done,
         codexFrontmost: true,
         actualCapsLockState: false,
-        at: start.addingTimeInterval(2.4)
+        at: start + 2.4
     ) == nil)
     #expect(policy.observe(
         mode: .done,
         codexFrontmost: true,
         actualCapsLockState: false,
-        at: start.addingTimeInterval(2.5)
+        at: start + 2.5
     ) == .codexViewed)
 }
 
 @Test("waiting for input cannot be dismissed as a completion")
 func waitingIsNotAcknowledged() {
-    let start = Date()
+    let start: TimeInterval = 100
     var policy = CompletionAcknowledgementPolicy(initialCapsLockState: false)
 
     #expect(policy.observe(
@@ -73,7 +73,7 @@ func waitingIsNotAcknowledged() {
 
 @Test("Caps Lock remains a normal key while MagSafe is the selected indicator")
 func capsLockDoesNotAcknowledgeWithMagSafe() {
-    let start = Date()
+    let start: TimeInterval = 100
     var policy = CompletionAcknowledgementPolicy(initialCapsLockState: false)
 
     #expect(policy.observe(
@@ -88,41 +88,43 @@ func capsLockDoesNotAcknowledgeWithMagSafe() {
         codexFrontmost: false,
         actualCapsLockState: true,
         capsLockAcknowledgementEnabled: false,
-        at: start.addingTimeInterval(1)
+        at: start + 1
     ) == nil)
 }
 
 @Test("a queued completion receives its own visibility dwell")
 func queuedCompletionResetsFocusDwell() {
-    let start = Date()
+    let start: TimeInterval = 100
+    let first = UUID()
+    let second = UUID()
     var policy = CompletionAcknowledgementPolicy(initialCapsLockState: false)
 
     #expect(policy.observe(
         mode: .done,
-        completionID: "first",
+        completionID: first,
         codexFrontmost: true,
         actualCapsLockState: false,
         at: start
     ) == nil)
     #expect(policy.observe(
         mode: .done,
-        completionID: "first",
+        completionID: first,
         codexFrontmost: true,
         actualCapsLockState: false,
-        at: start.addingTimeInterval(2)
+        at: start + 2
     ) == .codexViewed)
     #expect(policy.observe(
         mode: .done,
-        completionID: "second",
+        completionID: second,
         codexFrontmost: true,
         actualCapsLockState: false,
-        at: start.addingTimeInterval(2)
+        at: start + 2
     ) == nil)
     #expect(policy.observe(
         mode: .done,
-        completionID: "second",
+        completionID: second,
         codexFrontmost: true,
         actualCapsLockState: false,
-        at: start.addingTimeInterval(4)
+        at: start + 4
     ) == .codexViewed)
 }

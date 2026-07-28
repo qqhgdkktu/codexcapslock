@@ -32,4 +32,8 @@ func legacyDaemonStatusRemainsReadable() throws {
     #expect(status.magSafeExpectedValue == nil)
     #expect(status.magSafeSynchronized == nil)
     #expect(status.magSafeLastWriteAt == nil)
+    #expect(status.capsLockLogicalState == nil)
+    #expect(status.capsLockLEDActual == nil)
+    #expect(status.capsLockLEDExpected == nil)
+    #expect(status.capsLockSynchronized == nil)
 }
